@@ -128,55 +128,63 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 # 1. Configuración de valores base (promedios del rango)
-base_precio = 125       # (100+150)/2
-base_costo = 65         # (50+80)/2
-base_volumen = 1250     # (1000+1500)/2
+base_precio = 125  # (100+150)/2
+base_costo = 65  # (50+80)/2
+base_volumen = 1250  # (1000+1500)/2
+
 
 def calcular_utilidad(precio, costo, volumen):
     return (precio - costo) * volumen
+
 
 utilidad_base = calcular_utilidad(base_precio, base_costo, base_volumen)
 
 # 2. Definición de Rangos (Mínimo, Máximo)
 variables = {
-    'Precio de venta': [100, 150],
-    'Costo de producción': [80, 50],
-    'Volumen de ventas': [1000, 1500]
+    "Precio de venta": [100, 150],
+    "Costo de producción": [80, 50],
+    "Volumen de ventas": [1000, 1500],
 }
 
 # 3. Cálculo de impactos
 impactos = []
 for var, rango in variables.items():
-    if var == 'Precio de venta':
+    if var == "Precio de venta":
         u_min = calcular_utilidad(rango[0], base_costo, base_volumen)
         u_max = calcular_utilidad(rango[1], base_costo, base_volumen)
-    elif var == 'Costo de producción':
+    elif var == "Costo de producción":
         u_min = calcular_utilidad(base_precio, rango[0], base_volumen)
         u_max = calcular_utilidad(base_precio, rango[1], base_volumen)
-    elif var == 'Volumen de ventas':
+    elif var == "Volumen de ventas":
         u_min = calcular_utilidad(base_precio, base_costo, rango[0])
         u_max = calcular_utilidad(base_precio, base_costo, rango[1])
-    
-    impactos.append({
-        'Variable': var,
-        'Bajo': u_min - utilidad_base,
-        'Alto': u_max - utilidad_base,
-        'Rango_Total': abs(u_max - u_min)
-    })
+
+    impactos.append(
+        {
+            "Variable": var,
+            "Bajo": u_min - utilidad_base,
+            "Alto": u_max - utilidad_base,
+            "Rango_Total": abs(u_max - u_min),
+        }
+    )
 
 # 4. Ordenar datos por el tamaño del impacto (forma de tornado)
-df = pd.DataFrame(impactos).sort_values(by='Rango_Total', ascending=True)
+df = pd.DataFrame(impactos).sort_values(by="Rango_Total", ascending=True)
 
 # 5. Generar el Gráfico
 fig, ax = plt.subplots(figsize=(10, 6))
 
-ax.barh(df['Variable'], df['Bajo'], color='salmon', label='Impacto Negativo (Valor Mín)')
-ax.barh(df['Variable'], df['Alto'], color='skyblue', label='Impacto Positivo (Valor Máx)')
+ax.barh(
+    df["Variable"], df["Bajo"], color="salmon", label="Impacto Negativo (Valor Mín)"
+)
+ax.barh(
+    df["Variable"], df["Alto"], color="skyblue", label="Impacto Positivo (Valor Máx)"
+)
 
 # Línea base de utilidad neta
-ax.axvline(0, color='black', linestyle='--', alpha=0.7)
-ax.set_title('Análisis de Sensibilidad: Impacto en la Utilidad Neta', fontsize=14)
-ax.set_xlabel('Variación respecto a la Utilidad Base ($)')
+ax.axvline(0, color="black", linestyle="--", alpha=0.7)
+ax.set_title("Análisis de Sensibilidad: Impacto en la Utilidad Neta", fontsize=14)
+ax.set_xlabel("Variación respecto a la Utilidad Base ($)")
 ax.legend()
 
 plt.tight_layout()
@@ -217,9 +225,11 @@ Si bien el análisis de sensibilidad nos ayuda a entender el impacto de cada var
 import numpy as np
 import matplotlib.pyplot as plt
 
+
 # 1. Definir el modelo
 def calcular_utilidad(precio, costo, volumen):
     return (precio - costo) * volumen
+
 
 # 2. Asignar distribuciones de probabilidad
 precio = np.random.normal(loc=125, scale=15, size=10000)
@@ -229,12 +239,11 @@ volumen = np.random.normal(loc=1250, scale=200, size=10000)
 # 3. Ejecutar simulaciones
 utilidad = calcular_utilidad(precio, costo, volumen)
 # 4. Analizar resultados
-plt.hist(utilidad, bins=50, color='skyblue', edgecolor='black')
-plt.title('Simulación de Monte Carlo: Distribución de Utilidad Neta', fontsize=
-14)
-plt.xlabel('Utilidad Neta ($)')
-plt.ylabel('Frecuencia')
-plt.axvline(0, color='red', linestyle='--', label='Punto de Equilibrio')
+plt.hist(utilidad, bins=50, color="skyblue", edgecolor="black")
+plt.title("Simulación de Monte Carlo: Distribución de Utilidad Neta", fontsize=14)
+plt.xlabel("Utilidad Neta ($)")
+plt.ylabel("Frecuencia")
+plt.axvline(0, color="red", linestyle="--", label="Punto de Equilibrio")
 plt.legend()
 plt.tight_layout()
 plt.show()

@@ -1,0 +1,644 @@
+---
+title: "Análisis Predictivo en Business Intelligence: ejemplos en R"
+author: "Fernando Salcedo Mejía Eco, Ms"
+date: "Febrero 2026"
+lang: es
+format:
+  html:
+    toc: true
+    toc-depth: 2
+    number-sections: true
+    embed-resources: true
+    code-tools: true
+    df-print: kable
+execute:
+  warning: false
+  message: false
+---
+
+Este notebook desarrolla en R los casos de estudio de la presentación **Análisis Predictivo en Business Intelligence** con el enfoque [**tidymodels**](https://www.tidymodels.org/). Los datos son simulados con una semilla fija por el script `simular_datos.R`, que los guarda en la carpeta `datos/`. La versión en Python de este notebook lee los mismos archivos, por lo que ambos trabajan con exactamente los mismos datos.
+
+tidymodels organiza el modelado en piezas que se combinan siempre de la misma forma, sin importar el modelo:
+
+| Paquete | Pieza | Para qué sirve |
+|---|---|---|
+| `rsample` | `initial_split()`, `training()`, `testing()` | Partir los datos en entrenamiento y prueba |
+| `recipes` | `recipe()`, `step_*()` | Definir el preprocesamiento (roles, transformaciones, estandarización) |
+| `parsnip` | `linear_reg()`, `logistic_reg()`, `decision_tree()`, `rand_forest()` | Especificar el modelo y el motor que lo estima |
+| `workflows` | `workflow()` | Unir receta y modelo en un solo objeto que se ajusta y predice |
+| `yardstick` | `metric_set()`, `conf_mat()`, `roc_curve()` | Evaluar las predicciones |
+| `broom` | `tidy()`, `glance()`, `augment()` | Convertir los resultados de los modelos en tablas |
+
+```{r}
+library(tidymodels)
+library(tidyverse)
+library(rpart.plot)
+library(cluster)
+
+tidymodels_prefer() # en caso de conflicto, usar las funciones de tidymodels
+theme_set(theme_minimal(base_size = 13))
+```
+
+# Caso 1. Estimación y pronóstico de la demanda
+
+La gerencia de una tienda de electrónica quiere ajustar los precios de sus cinco productos estrella para el próximo trimestre. Para anticipar el efecto en las ventas se estima la **elasticidad precio de la demanda** de cada producto con un modelo log-log:
+
+$$
+\ln(Q) = \beta_1 + \beta_2 \ln(P) + \varepsilon, \qquad E_p = \beta_2
+$$
+
+## Datos
+
+Ventas mensuales de cada producto entre 2016 y 2023.
+
+```{r}
+ventas <- read_csv("datos/ventas_electronica.csv", show_col_types = FALSE)
+head(ventas)
+```
+
+```{r}
+#| fig-width: 11
+#| fig-height: 6
+ggplot(ventas, aes(log(precio), log(cantidad))) +
+  geom_point(color = "skyblue", alpha = 0.7) +
+  geom_smooth(method = "lm", color = "red", linewidth = 0.8) +
+  facet_wrap(~producto, scales = "free") +
+  labs(
+    title = "Relación log-log entre precio y cantidad vendida",
+    x = "ln(precio)",
+    y = "ln(cantidad)"
+  )
+```
+
+## Estimación de la elasticidad
+
+Se especifica una regresión lineal con `parsnip` y se ajusta una vez por producto: `nest()` guarda los datos de cada producto en una lista y `map()` ajusta el modelo a cada uno. El coeficiente de $\ln(P)$ es la elasticidad.
+
+```{r}
+modelo_lm <- linear_reg() |>
+  set_engine("lm")
+
+ajustes_demanda <- ventas |>
+  nest(datos = -producto) |>
+  mutate(
+    ajuste = map(datos, \(d) {
+      fit(modelo_lm, log(cantidad) ~ log(precio), data = d)
+    }),
+    coeficientes = map(ajuste, \(m) tidy(m, conf.int = TRUE)),
+    r2 = map_dbl(ajuste, \(m) glance(m)$r.squared)
+  )
+
+elasticidades <- ajustes_demanda |>
+  unnest(coeficientes) |>
+  filter(term == "log(precio)") |>
+  select(producto, elasticidad = estimate, conf.low, conf.high, p.value, r2) |>
+  arrange(producto)
+
+elasticidades |> mutate(across(where(is.numeric), \(x) round(x, 3)))
+```
+
+Todas las elasticidades son negativas y significativas, como predice la **ley de la demanda**. Por ejemplo, para los audífonos un aumento del 1 % en el precio reduce la cantidad vendida en cerca de `r round(-elasticidades$elasticidad[elasticidades$producto == "Audífonos"], 1)` %.
+
+## Del modelo a la decisión de precios
+
+Como el ingreso es $I = P \cdot Q$ y $Q \propto P^{E_p}$, el ingreso varía según $P^{1 + E_p}$:
+
+- **Demanda elástica** ($E_p < -1$): bajar el precio **aumenta** el ingreso.
+- **Demanda inelástica** ($-1 < E_p < 0$): subir el precio **aumenta** el ingreso.
+
+```{r}
+elasticidades |>
+  transmute(
+    producto,
+    elasticidad = round(elasticidad, 2),
+    tipo = if_else(elasticidad < -1, "Elástica", "Inelástica"),
+    `Δ% ingreso si el precio sube 5 %` = round(
+      (1.05^(1 + elasticidad) - 1) * 100,
+      1
+    ),
+    `Δ% ingreso si el precio baja 5 %` = round(
+      (0.95^(1 + elasticidad) - 1) * 100,
+      1
+    ),
+    recomendacion = if_else(elasticidad < -1, "Bajar precio", "Subir precio")
+  )
+```
+
+Antes de decidir conviene mirar los intervalos de confianza: para `r with(elasticidades, paste(producto[conf.low < -1 & conf.high > -1], collapse = " y "))` el intervalo incluye $E_p = -1$, por lo que no se puede afirmar si la demanda es elástica o inelástica y el efecto de un cambio de precio sobre el ingreso es pequeño e incierto.
+
+## Pronóstico con el modelo
+
+Con `predict()` se pronostica la cantidad para un precio nuevo. Por ejemplo, el efecto de bajar 5 % el precio de los audífonos respecto a su precio promedio:
+
+```{r}
+ajuste_audifonos <- ajustes_demanda |>
+  filter(producto == "Audífonos") |>
+  pull(ajuste) |>
+  pluck(1)
+
+precio_medio <- mean(ventas$precio[ventas$producto == "Audífonos"])
+
+escenarios <- tibble(
+  escenario = c("Precio promedio", "Precio -5 %"),
+  precio = precio_medio * c(1, 0.95)
+)
+
+escenarios |>
+  bind_cols(predict(ajuste_audifonos, new_data = escenarios)) |>
+  mutate(
+    cantidad = exp(.pred),
+    ingreso = precio * cantidad,
+    across(where(is.numeric), \(x) round(x, 1))
+  ) |>
+  select(-.pred)
+```
+
+# Caso 2. Fuga de clientes (churn)
+
+Una empresa de telecomunicaciones quiere decidir **a qué clientes dirigir una campaña de retención**. Se comparan tres modelos de clasificación: logit, árbol de clasificación y random forest.
+
+## Datos
+
+```{r}
+telco <- read_csv("datos/telco_churn.csv", show_col_types = FALSE) |>
+  mutate(
+    # Mensual como categoría de referencia
+    contrato = factor(contrato, levels = c("Mensual", "Anual", "Bianual")),
+    churn = factor(churn, levels = 0:1, labels = c("Permanece", "Fuga"))
+  )
+
+head(telco)
+```
+
+```{r}
+telco |>
+  group_by(contrato) |>
+  summarise(clientes = n(), tasa_fuga = round(mean(churn == "Fuga") * 100, 1))
+```
+
+La tasa de fuga general es de `r round(mean(telco$churn == "Fuga") * 100, 1)` %. Los clientes con contrato mensual se van mucho más que los de contratos largos.
+
+## Entrenamiento y prueba
+
+Partición estratificada: 70 % para entrenar y 30 % para evaluar, con la misma proporción de fuga en ambos conjuntos. Con `rsample` se haría así:
+
+```{r}
+#| eval: false
+set.seed(2026)
+particion <- initial_split(telco, prop = 0.7, strata = churn)
+```
+
+Para que los resultados coincidan con la versión en Python, la partición ya viene definida en la columna `conjunto` de los datos. `make_splits()` construye con ella el mismo tipo de objeto que devuelve `initial_split()`:
+
+```{r}
+particion <- make_splits(
+  list(
+    analysis = which(telco$conjunto == "entrenamiento"),
+    assessment = which(telco$conjunto == "prueba")
+  ),
+  data = telco
+)
+particion
+
+entrenamiento <- training(particion)
+prueba <- testing(particion)
+
+bind_rows(Entrenamiento = entrenamiento, Prueba = prueba, .id = "conjunto") |>
+  group_by(conjunto) |>
+  summarise(clientes = n(), tasa_fuga = round(mean(churn == "Fuga") * 100, 1))
+```
+
+## Receta de preprocesamiento
+
+La receta declara que `churn` es la variable de respuesta y que `id_cliente` y `conjunto` son identificadores, no predictores. Se usa la misma receta para los tres modelos.
+
+```{r}
+receta <- recipe(churn ~ ., data = entrenamiento) |>
+  update_role(id_cliente, conjunto, new_role = "id")
+
+summary(receta)
+```
+
+## Regresión logística (logit)
+
+Cada modelo se especifica con `parsnip` (tipo de modelo + motor) y se une a la receta en un `workflow`, que se ajusta con los datos de entrenamiento.
+
+```{r}
+logit_fit <- workflow(
+  preprocessor = receta,
+  spec = logistic_reg() |> set_engine("glm")
+) |>
+  fit(data = entrenamiento)
+
+tidy(logit_fit) |> mutate(across(where(is.numeric), \(x) round(x, 4)))
+```
+
+Los **odds ratios** ($e^{\beta_j}$) facilitan la interpretación:
+
+```{r}
+odds_ratios <- tidy(logit_fit, exponentiate = TRUE, conf.int = TRUE) |>
+  select(
+    variable = term,
+    odds_ratio = estimate,
+    conf.low,
+    conf.high,
+    p.value
+  )
+
+odds_ratios |> mutate(across(where(is.numeric), \(x) round(x, 3)))
+```
+
+```{r}
+#| echo: false
+or <- deframe(select(odds_ratios, variable, odds_ratio))
+```
+
+Cada llamada adicional a soporte multiplica los *odds* de fuga por `r round(or["llamadas_soporte"], 2)`, mientras que un contrato bianual los multiplica por `r round(or["contratoBianual"], 2)` frente al contrato mensual.
+
+## Árbol de clasificación
+
+Se limita la profundidad a 3 niveles (`tree_depth`) y se exigen al menos 50 clientes por hoja (`minbucket`, argumento del motor `rpart`) para evitar el sobreajuste.
+
+```{r}
+#| fig-width: 12
+#| fig-height: 6
+arbol_spec <- decision_tree(tree_depth = 3, min_n = 150, cost_complexity = 0) |>
+  set_engine("rpart", minbucket = 50) |>
+  set_mode("classification")
+
+arbol_fit <- workflow(receta, arbol_spec) |>
+  fit(data = entrenamiento)
+
+arbol_rpart <- extract_fit_engine(arbol_fit)
+
+rpart.plot(
+  arbol_rpart,
+  type = 2,
+  extra = 104,
+  box.palette = "BuPu",
+  roundint = FALSE,
+  main = "Árbol de clasificación: fuga de clientes"
+)
+```
+
+El árbol puede expresarse como **reglas de decisión** para comunicarlas a la gerencia:
+
+```{r}
+reglas <- rpart.rules(arbol_rpart, cover = TRUE, roundint = FALSE)
+names(reglas)[1] <- "prob_fuga" # workflows llama `..y` a la variable de respuesta
+reglas
+```
+
+## Random forest
+
+Se usa el motor `randomForest`. El cambio de motor (por ejemplo a `ranger`, el más usado en tidymodels) solo requiere modificar `set_engine()`.
+
+```{r}
+bosque_spec <- rand_forest(trees = 300, min_n = 20) |>
+  set_engine("randomForest") |>
+  set_mode("classification")
+
+set.seed(2026)
+bosque_fit <- workflow(receta, bosque_spec) |>
+  fit(data = entrenamiento)
+
+bosque_fit
+```
+
+```{r}
+#| fig-width: 9
+#| fig-height: 5
+extract_fit_engine(bosque_fit)$importance |>
+  as_tibble(rownames = "variable") |>
+  ggplot(aes(MeanDecreaseGini, reorder(variable, MeanDecreaseGini))) +
+  geom_col(fill = "skyblue", color = "black") +
+  labs(
+    title = "Random forest: importancia de las variables",
+    x = "Reducción media de la impureza (Gini)",
+    y = NULL
+  )
+```
+
+## Comparación de modelos
+
+`augment()` agrega al conjunto de prueba la clase predicha (`.pred_class`, con umbral 0.5) y las probabilidades de cada clase (`.pred_Permanece`, `.pred_Fuga`). Con `yardstick` se calculan las métricas; como `Fuga` es el segundo nivel de `churn`, se indica `event_level = "second"`.
+
+```{r}
+modelos <- list(
+  "Logit" = logit_fit,
+  "Árbol" = arbol_fit,
+  "Random forest" = bosque_fit
+)
+
+predicciones <- modelos |>
+  map(\(m) augment(m, new_data = prueba)) |>
+  list_rbind(names_to = "Modelo") |>
+  mutate(Modelo = factor(Modelo, levels = names(modelos)))
+
+metricas_clasificacion <- metric_set(
+  accuracy,
+  precision,
+  sensitivity,
+  specificity,
+  f_meas,
+  roc_auc
+)
+
+metricas <- predicciones |>
+  group_by(Modelo) |>
+  metricas_clasificacion(
+    truth = churn,
+    estimate = .pred_class,
+    .pred_Fuga,
+    event_level = "second"
+  ) |>
+  mutate(
+    .metric = recode(
+      .metric,
+      accuracy = "Exactitud",
+      precision = "Precisión",
+      sensitivity = "Sensibilidad",
+      specificity = "Especificidad",
+      f_meas = "F1",
+      roc_auc = "AUC"
+    )
+  ) |>
+  pivot_wider(id_cols = Modelo, names_from = .metric, values_from = .estimate)
+
+mejor_modelo <- as.character(metricas$Modelo[which.max(metricas$AUC)])
+
+metricas |> mutate(across(where(is.numeric), \(x) round(x, 3)))
+```
+
+El modelo con mayor AUC es **`r mejor_modelo`**. Un modelo más complejo no siempre predice mejor: cuando la relación entre las variables y el *log-odds* de fuga es casi lineal, el logit compite de igual a igual con el random forest. Con el umbral de 0.5 la **sensibilidad es baja** (se detecta una minoría de los clientes que se van), lo que motiva revisar el umbral.
+
+## Matriz de confusión y curva ROC
+
+```{r}
+#| fig-width: 6
+#| fig-height: 5
+predicciones |>
+  filter(Modelo == mejor_modelo) |>
+  conf_mat(truth = churn, estimate = .pred_class) |>
+  autoplot(type = "heatmap") +
+  scale_fill_gradient(low = "#e8f1fb", high = "#3b7dd8") +
+  labs(
+    title = paste("Matriz de confusión:", mejor_modelo, "(umbral 0.5)"),
+    x = "Real",
+    y = "Predicho"
+  )
+```
+
+```{r}
+#| fig-width: 8
+#| fig-height: 6
+etiquetas_auc <- metricas |>
+  transmute(Modelo, etiqueta = sprintf("%s (AUC = %.3f)", Modelo, AUC))
+
+predicciones |>
+  group_by(Modelo) |>
+  roc_curve(truth = churn, .pred_Fuga, event_level = "second") |>
+  left_join(etiquetas_auc, by = "Modelo") |>
+  ggplot(aes(1 - specificity, sensitivity, color = etiqueta)) +
+  geom_path(linewidth = 1) +
+  geom_abline(linetype = "dashed", color = "gray50") +
+  coord_equal() +
+  labs(
+    title = "Curva ROC",
+    x = "Tasa de falsos positivos (1 - especificidad)",
+    y = "Tasa de verdaderos positivos (sensibilidad)",
+    color = NULL
+  ) +
+  theme(legend.position = "bottom", legend.direction = "vertical")
+```
+
+## Elegir el umbral
+
+Supuestos de la campaña: contactar a un cliente cuesta **USD 20** y retener a un cliente que se iba a fugar vale **USD 100**.
+
+$$
+\text{Beneficio}(u) = 100 \cdot VP(u) - 20 \cdot \left[VP(u) + FP(u)\right]
+$$
+
+```{r}
+#| fig-width: 9
+#| fig-height: 5
+pred_mejor <- filter(predicciones, Modelo == mejor_modelo)
+
+beneficio <- tibble(umbral = seq(0.05, 0.95, by = 0.01)) |>
+  mutate(
+    contactados = map_dbl(umbral, \(u) sum(pred_mejor$.pred_Fuga >= u)),
+    vp = map_dbl(umbral, \(u) {
+      sum(pred_mejor$.pred_Fuga >= u & pred_mejor$churn == "Fuga")
+    }),
+    beneficio = 100 * vp - 20 * contactados
+  )
+
+optimo <- slice_max(beneficio, beneficio, n = 1, with_ties = FALSE)
+beneficio_05 <- beneficio$beneficio[near(beneficio$umbral, 0.5)]
+
+ggplot(beneficio, aes(umbral, beneficio)) +
+  geom_line(color = "#790cee", linewidth = 1.2) +
+  geom_vline(xintercept = optimo$umbral, color = "red", linetype = "dashed") +
+  geom_vline(xintercept = 0.5, color = "gray50", linetype = "dotted") +
+  annotate(
+    "text",
+    x = optimo$umbral,
+    y = min(beneficio$beneficio),
+    hjust = -0.1,
+    label = paste("Umbral óptimo =", optimo$umbral),
+    color = "red"
+  ) +
+  labs(
+    title = paste(
+      "Beneficio de la campaña según el umbral de decisión:",
+      mejor_modelo
+    ),
+    x = "Umbral de probabilidad de fuga",
+    y = "Beneficio neto (USD)"
+  )
+```
+
+Con el umbral por defecto de 0.5 la campaña genera USD `r format(beneficio_05, big.mark = ".", decimal.mark = ",")`. Con el umbral óptimo de `r optimo$umbral` se contacta a `r optimo$contactados` clientes y el beneficio sube a USD `r format(optimo$beneficio, big.mark = ".", decimal.mark = ",")`. Como retener a un cliente vale cinco veces lo que cuesta contactarlo, conviene contactar a muchos más clientes de los que el umbral de 0.5 sugiere.
+
+Con el umbral óptimo, las métricas del modelo cambian: se sacrifica precisión a cambio de detectar a muchos más clientes que se van.
+
+```{r}
+pred_mejor |>
+  mutate(
+    .pred_class = factor(
+      if_else(.pred_Fuga >= optimo$umbral, "Fuga", "Permanece"),
+      levels = levels(churn)
+    )
+  ) |>
+  metric_set(accuracy, precision, sensitivity, specificity)(
+    truth = churn,
+    estimate = .pred_class,
+    event_level = "second"
+  ) |>
+  transmute(
+    metrica = recode(
+      .metric,
+      accuracy = "Exactitud",
+      precision = "Precisión",
+      sensitivity = "Sensibilidad",
+      specificity = "Especificidad"
+    ),
+    `umbral 0.5` = map_dbl(metrica, \(m) {
+      metricas[[m]][metricas$Modelo == mejor_modelo]
+    }),
+    `umbral óptimo` = .estimate
+  ) |>
+  mutate(across(where(is.numeric), \(x) round(x, 3)))
+```
+
+# Caso 3. Segmentación de clientes (RFM)
+
+El área de marketing de una cadena de retail quiere diseñar acciones diferenciadas según el comportamiento de compra de sus clientes: **recencia**, **frecuencia** y **ticket promedio**.
+
+## Datos
+
+```{r}
+retail <- read_csv("datos/retail_rfm.csv", show_col_types = FALSE)
+summary(select(retail, -id_cliente))
+```
+
+## Estandarización con una receta
+
+k-means usa distancias, así que las variables se estandarizan con `step_normalize()`. Al preparar la receta (`prep()`) se guardan la media y la desviación de cada variable, que después se reutilizan para estandarizar clientes nuevos.
+
+```{r}
+variables_rfm <- c("recencia", "frecuencia", "ticket_promedio")
+
+receta_rfm <- recipe(
+  ~ recencia + frecuencia + ticket_promedio,
+  data = retail
+) |>
+  step_normalize(all_numeric_predictors()) |>
+  prep()
+
+X_rfm <- bake(receta_rfm, new_data = NULL)
+
+tidy(receta_rfm, number = 1) |> select(variable = terms, statistic, value)
+```
+
+## Elegir el número de grupos
+
+Se estima k-means para $k = 2, \dots, 8$, con 10 inicializaciones aleatorias cada uno (`nstart`). `glance()` entrega la inercia (`tot.withinss`) de cada modelo.
+
+```{r}
+#| fig-width: 11
+#| fig-height: 4.5
+distancias <- dist(X_rfm)
+
+set.seed(2026)
+seleccion_k <- tibble(k = 2:8) |>
+  mutate(
+    modelo = map(k, \(k) kmeans(X_rfm, centers = k, nstart = 10)),
+    `Inercia (WCSS)` = map_dbl(modelo, \(m) glance(m)$tot.withinss),
+    `Silueta promedio` = map_dbl(modelo, \(m) {
+      mean(silhouette(m$cluster, distancias)[, "sil_width"])
+    })
+  )
+
+seleccion_k |>
+  select(-modelo) |>
+  pivot_longer(-k, names_to = "criterio", values_to = "valor") |>
+  ggplot(aes(k, valor)) +
+  geom_line(color = "#790cee", linewidth = 1) +
+  geom_point(color = "#790cee", size = 2.5) +
+  facet_wrap(~criterio, scales = "free_y") +
+  labs(
+    title = "Método del codo y coeficiente de silueta",
+    x = "Número de grupos (k)",
+    y = NULL
+  )
+```
+
+El codo aparece en $k = `r seleccion_k$k[which.max(seleccion_k[["Silueta promedio"]])]`$, que también maximiza la silueta.
+
+## Estimación y perfil de los segmentos
+
+`augment()` agrega a los datos la columna `.cluster` con el grupo asignado a cada cliente.
+
+```{r}
+set.seed(2026)
+kmeans_rfm <- kmeans(X_rfm, centers = 4, nstart = 10)
+
+# Nombrar los segmentos ordenándolos por recencia (de más a menos reciente)
+nombres <- c("Campeones", "Leales", "Ocasionales de alto ticket", "Inactivos")
+
+retail <- augment(kmeans_rfm, retail) |>
+  rename(grupo = .cluster)
+
+perfil <- retail |>
+  group_by(grupo) |>
+  summarise(across(all_of(variables_rfm), mean), clientes = n()) |>
+  mutate(pct_clientes = clientes / sum(clientes) * 100) |>
+  arrange(recencia) |>
+  mutate(segmento = factor(nombres, levels = nombres))
+
+retail <- left_join(retail, select(perfil, grupo, segmento), by = "grupo")
+
+perfil |>
+  select(segmento, all_of(variables_rfm), clientes, pct_clientes) |>
+  mutate(across(where(is.numeric), \(x) round(x, 1)))
+```
+
+## Visualización de los segmentos
+
+```{r}
+#| fig-width: 11
+#| fig-height: 5
+colores <- c("#790cee", "skyblue", "orange", "salmon")
+
+ggplot(retail, aes(recencia, frecuencia, color = segmento)) +
+  geom_point(size = 1.2, alpha = 0.6) +
+  scale_color_manual(values = colores) +
+  labs(
+    title = "Recencia vs. frecuencia",
+    x = "Recencia (días)",
+    y = "Frecuencia (compras al año)",
+    color = NULL
+  )
+
+ggplot(retail, aes(frecuencia, ticket_promedio, color = segmento)) +
+  geom_point(size = 1.2, alpha = 0.6) +
+  scale_color_manual(values = colores) +
+  labs(
+    title = "Frecuencia vs. ticket promedio",
+    x = "Frecuencia (compras al año)",
+    y = "Ticket promedio (USD)",
+    color = NULL
+  )
+```
+
+## Asignar un cliente nuevo
+
+Un cliente nuevo se estandariza con la **misma receta** (`bake()` usa la media y la desviación de los datos originales) y se asigna al **centroide más cercano**. Los centroides se obtienen con `tidy()`.
+
+```{r}
+nuevo <- tibble(recencia = 15, frecuencia = 20, ticket_promedio = 110)
+nuevo_z <- bake(receta_rfm, new_data = nuevo)
+
+tidy(kmeans_rfm) |>
+  mutate(
+    distancia = sqrt(
+      (recencia - nuevo_z$recencia)^2 +
+        (frecuencia - nuevo_z$frecuencia)^2 +
+        (ticket_promedio - nuevo_z$ticket_promedio)^2
+    )
+  ) |>
+  slice_min(distancia, n = 1) |>
+  left_join(select(perfil, grupo, segmento), by = c("cluster" = "grupo")) |>
+  transmute(segmento, distancia = round(distancia, 3))
+```
+
+## Acciones por segmento
+
+| Segmento | Acción comercial sugerida |
+|---|---|
+| **Campeones** | Programa de fidelización, acceso anticipado a lanzamientos, embajadores de marca |
+| **Leales** | Venta cruzada y venta adicional para subir el ticket |
+| **Ocasionales de alto ticket** | Recordatorios personalizados y beneficios por recompra para aumentar la frecuencia |
+| **Inactivos** | Campaña de reactivación de bajo costo; si no responden, reducir inversión |
