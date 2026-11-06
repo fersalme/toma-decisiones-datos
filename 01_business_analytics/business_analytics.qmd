@@ -5,18 +5,18 @@ afi: "Escuela de Transformación Digital - ETD | Programa de Ciencia de Datos"
 date: "Febrero 2026"
 format:
   revealjs:
-    theme: [default, style.scss]
+    theme: [default, ../recursos/style.scss]
     slide-number: true
     transition: slide
     scrollable: true
     background-transition: fade
-    logo: logo_utb.png
+    logo: ../recursos/logo_utb.png
     footer: "UTB-ETD | Programa de Ciencia de Datos"
     incremental: false
     smaller: false
     embed-resources: true
 title-slide-attributes:
-    data-background-image: plantilla-inicio.png
+    data-background-image: ../recursos/plantilla-inicio.png
     data-background-opacity: "0.6"
 ---
 
@@ -144,7 +144,7 @@ Incluso los analistas requerían formación extensa para consultar y analizar lo
 
 ##  Cómo funciona la BI 
 
-![](business-intelligence-diagram_16x9.jpg)
+![](img/business-intelligence-diagram_16x9.jpg)
 
 ::: {.notes}
 El ciclo de datos es continuo y retroalimentado. Los resultados generan nuevos datos que refinan futuras decisiones.
@@ -217,7 +217,7 @@ flowchart TD
 :::
 
 ::: {.column width="70%"}
-![](warehouse.png)
+![](img/warehouse.png)
 :::
 ::::
 
@@ -225,13 +225,13 @@ flowchart TD
 
 ## Estilos de Bi
 
-![](estilosbi.png)
+![](img/estilosbi.png)
 
 ---
 
 ## Tipos de análisis Bi
 
-![](tipobi.png)
+![](img/tipobi.png)
 
 ---
 

@@ -1,0 +1,379 @@
+---
+title: "Análisis Predictivo en Business Intelligence: clasificación en R"
+author: "Fernando Salcedo Mejía Eco, Ms"
+date: "Febrero 2026"
+lang: es
+format:
+  html:
+    toc: true
+    toc-depth: 2
+    number-sections: true
+    embed-resources: true
+    code-tools: true
+    df-print: kable
+execute:
+  warning: false
+  message: false
+---
+
+Este notebook desarrolla en R los casos de estudio de la presentación **Análisis Predictivo en Business Intelligence** con el enfoque [**tidymodels**](https://www.tidymodels.org/). Los datos son simulados con una semilla fija por el script `simular_datos.R`, que los guarda en la carpeta `datos/`. La versión en Python de este notebook lee los mismos archivos, por lo que ambos trabajan con exactamente los mismos datos.
+
+tidymodels organiza el modelado en piezas que se combinan siempre de la misma forma, sin importar el modelo:
+
+| Paquete | Pieza | Para qué sirve |
+|---|---|---|
+| `rsample` | `initial_split()`, `training()`, `testing()` | Partir los datos en entrenamiento y prueba |
+| `recipes` | `recipe()`, `step_*()` | Definir el preprocesamiento (roles, transformaciones, estandarización) |
+| `parsnip` | `logistic_reg()`, `decision_tree()`, `rand_forest()` | Especificar el modelo y el motor que lo estima |
+| `workflows` | `workflow()` | Unir receta y modelo en un solo objeto que se ajusta y predice |
+| `yardstick` | `metric_set()`, `conf_mat()`, `roc_curve()` | Evaluar las predicciones |
+| `broom` | `tidy()`, `glance()`, `augment()` | Convertir los resultados de los modelos en tablas |
+
+```{r}
+library(tidymodels)
+library(tidyverse)
+library(rpart.plot)
+
+tidymodels_prefer() # en caso de conflicto, usar las funciones de tidymodels
+theme_set(theme_minimal(base_size = 13))
+```
+
+# Fuga de clientes (churn)
+
+Una empresa de telecomunicaciones quiere decidir **a qué clientes dirigir una campaña de retención**. Se comparan tres modelos de clasificación: logit, árbol de clasificación y random forest.
+
+## Datos
+
+```{r}
+telco <- read_csv("datos/telco_churn.csv", show_col_types = FALSE) |>
+  mutate(
+    # Mensual como categoría de referencia
+    contrato = factor(contrato, levels = c("Mensual", "Anual", "Bianual")),
+    churn = factor(churn, levels = 0:1, labels = c("Permanece", "Fuga"))
+  )
+
+head(telco)
+```
+
+```{r}
+telco |>
+  group_by(contrato) |>
+  summarise(clientes = n(), tasa_fuga = round(mean(churn == "Fuga") * 100, 1))
+```
+
+La tasa de fuga general es de `r round(mean(telco$churn == "Fuga") * 100, 1)` %. Los clientes con contrato mensual se van mucho más que los de contratos largos.
+
+## Entrenamiento y prueba
+
+Partición estratificada: 70 % para entrenar y 30 % para evaluar, con la misma proporción de fuga en ambos conjuntos. Con `rsample` se haría así:
+
+```{r}
+#| eval: false
+set.seed(2026)
+particion <- initial_split(telco, prop = 0.7, strata = churn)
+```
+
+Para que los resultados coincidan con la versión en Python, la partición ya viene definida en la columna `conjunto` de los datos. `make_splits()` construye con ella el mismo tipo de objeto que devuelve `initial_split()`:
+
+```{r}
+particion <- make_splits(
+  list(
+    analysis = which(telco$conjunto == "entrenamiento"),
+    assessment = which(telco$conjunto == "prueba")
+  ),
+  data = telco
+)
+particion
+
+entrenamiento <- training(particion)
+prueba <- testing(particion)
+
+bind_rows(Entrenamiento = entrenamiento, Prueba = prueba, .id = "conjunto") |>
+  group_by(conjunto) |>
+  summarise(clientes = n(), tasa_fuga = round(mean(churn == "Fuga") * 100, 1))
+```
+
+## Receta de preprocesamiento
+
+La receta declara que `churn` es la variable de respuesta y que `id_cliente` y `conjunto` son identificadores, no predictores. Se usa la misma receta para los tres modelos.
+
+```{r}
+receta <- recipe(churn ~ ., data = entrenamiento) |>
+  update_role(id_cliente, conjunto, new_role = "id")
+
+summary(receta)
+```
+
+## Regresión logística (logit)
+
+Cada modelo se especifica con `parsnip` (tipo de modelo + motor) y se une a la receta en un `workflow`, que se ajusta con los datos de entrenamiento.
+
+```{r}
+logit_fit <- workflow(
+  preprocessor = receta,
+  spec = logistic_reg() |> set_engine("glm")
+) |>
+  fit(data = entrenamiento)
+
+tidy(logit_fit) |> mutate(across(where(is.numeric), \(x) round(x, 4)))
+```
+
+Los **odds ratios** ($e^{\beta_j}$) facilitan la interpretación:
+
+```{r}
+odds_ratios <- tidy(logit_fit, exponentiate = TRUE, conf.int = TRUE) |>
+  select(
+    variable = term,
+    odds_ratio = estimate,
+    conf.low,
+    conf.high,
+    p.value
+  )
+
+odds_ratios |> mutate(across(where(is.numeric), \(x) round(x, 3)))
+```
+
+```{r}
+#| echo: false
+or <- deframe(select(odds_ratios, variable, odds_ratio))
+```
+
+Cada llamada adicional a soporte multiplica los *odds* de fuga por `r round(or["llamadas_soporte"], 2)`, mientras que un contrato bianual los multiplica por `r round(or["contratoBianual"], 2)` frente al contrato mensual.
+
+## Árbol de clasificación
+
+Se limita la profundidad a 3 niveles (`tree_depth`) y se exigen al menos 50 clientes por hoja (`minbucket`, argumento del motor `rpart`) para evitar el sobreajuste.
+
+```{r}
+#| fig-width: 12
+#| fig-height: 6
+arbol_spec <- decision_tree(tree_depth = 3, min_n = 150, cost_complexity = 0) |>
+  set_engine("rpart", minbucket = 50) |>
+  set_mode("classification")
+
+arbol_fit <- workflow(receta, arbol_spec) |>
+  fit(data = entrenamiento)
+
+arbol_rpart <- extract_fit_engine(arbol_fit)
+
+rpart.plot(
+  arbol_rpart,
+  type = 2,
+  extra = 104,
+  box.palette = "BuPu",
+  roundint = FALSE,
+  main = "Árbol de clasificación: fuga de clientes"
+)
+```
+
+El árbol puede expresarse como **reglas de decisión** para comunicarlas a la gerencia:
+
+```{r}
+reglas <- rpart.rules(arbol_rpart, cover = TRUE, roundint = FALSE)
+names(reglas)[1] <- "prob_fuga" # workflows llama `..y` a la variable de respuesta
+reglas
+```
+
+## Random forest
+
+Se usa el motor `randomForest`. El cambio de motor (por ejemplo a `ranger`, el más usado en tidymodels) solo requiere modificar `set_engine()`.
+
+```{r}
+bosque_spec <- rand_forest(trees = 300, min_n = 20) |>
+  set_engine("randomForest") |>
+  set_mode("classification")
+
+set.seed(2026)
+bosque_fit <- workflow(receta, bosque_spec) |>
+  fit(data = entrenamiento)
+
+bosque_fit
+```
+
+```{r}
+#| fig-width: 9
+#| fig-height: 5
+extract_fit_engine(bosque_fit)$importance |>
+  as_tibble(rownames = "variable") |>
+  ggplot(aes(MeanDecreaseGini, reorder(variable, MeanDecreaseGini))) +
+  geom_col(fill = "skyblue", color = "black") +
+  labs(
+    title = "Random forest: importancia de las variables",
+    x = "Reducción media de la impureza (Gini)",
+    y = NULL
+  )
+```
+
+## Comparación de modelos
+
+`augment()` agrega al conjunto de prueba la clase predicha (`.pred_class`, con umbral 0.5) y las probabilidades de cada clase (`.pred_Permanece`, `.pred_Fuga`). Con `yardstick` se calculan las métricas; como `Fuga` es el segundo nivel de `churn`, se indica `event_level = "second"`.
+
+```{r}
+modelos <- list(
+  "Logit" = logit_fit,
+  "Árbol" = arbol_fit,
+  "Random forest" = bosque_fit
+)
+
+predicciones <- modelos |>
+  map(\(m) augment(m, new_data = prueba)) |>
+  list_rbind(names_to = "Modelo") |>
+  mutate(Modelo = factor(Modelo, levels = names(modelos)))
+
+metricas_clasificacion <- metric_set(
+  accuracy,
+  precision,
+  sensitivity,
+  specificity,
+  f_meas,
+  roc_auc
+)
+
+metricas <- predicciones |>
+  group_by(Modelo) |>
+  metricas_clasificacion(
+    truth = churn,
+    estimate = .pred_class,
+    .pred_Fuga,
+    event_level = "second"
+  ) |>
+  mutate(
+    .metric = recode(
+      .metric,
+      accuracy = "Exactitud",
+      precision = "Precisión",
+      sensitivity = "Sensibilidad",
+      specificity = "Especificidad",
+      f_meas = "F1",
+      roc_auc = "AUC"
+    )
+  ) |>
+  pivot_wider(id_cols = Modelo, names_from = .metric, values_from = .estimate)
+
+mejor_modelo <- as.character(metricas$Modelo[which.max(metricas$AUC)])
+
+metricas |> mutate(across(where(is.numeric), \(x) round(x, 3)))
+```
+
+El modelo con mayor AUC es **`r mejor_modelo`**. Un modelo más complejo no siempre predice mejor: cuando la relación entre las variables y el *log-odds* de fuga es casi lineal, el logit compite de igual a igual con el random forest. Con el umbral de 0.5 la **sensibilidad es baja** (se detecta una minoría de los clientes que se van), lo que motiva revisar el umbral.
+
+## Matriz de confusión y curva ROC
+
+```{r}
+#| fig-width: 6
+#| fig-height: 5
+predicciones |>
+  filter(Modelo == mejor_modelo) |>
+  conf_mat(truth = churn, estimate = .pred_class) |>
+  autoplot(type = "heatmap") +
+  scale_fill_gradient(low = "#e8f1fb", high = "#3b7dd8") +
+  labs(
+    title = paste("Matriz de confusión:", mejor_modelo, "(umbral 0.5)"),
+    x = "Real",
+    y = "Predicho"
+  )
+```
+
+```{r}
+#| fig-width: 8
+#| fig-height: 6
+etiquetas_auc <- metricas |>
+  transmute(Modelo, etiqueta = sprintf("%s (AUC = %.3f)", Modelo, AUC))
+
+predicciones |>
+  group_by(Modelo) |>
+  roc_curve(truth = churn, .pred_Fuga, event_level = "second") |>
+  left_join(etiquetas_auc, by = "Modelo") |>
+  ggplot(aes(1 - specificity, sensitivity, color = etiqueta)) +
+  geom_path(linewidth = 1) +
+  geom_abline(linetype = "dashed", color = "gray50") +
+  coord_equal() +
+  labs(
+    title = "Curva ROC",
+    x = "Tasa de falsos positivos (1 - especificidad)",
+    y = "Tasa de verdaderos positivos (sensibilidad)",
+    color = NULL
+  ) +
+  theme(legend.position = "bottom", legend.direction = "vertical")
+```
+
+## Elegir el umbral
+
+Supuestos de la campaña: contactar a un cliente cuesta **USD 20** y retener a un cliente que se iba a fugar vale **USD 100**.
+
+$$
+\text{Beneficio}(u) = 100 \cdot VP(u) - 20 \cdot \left[VP(u) + FP(u)\right]
+$$
+
+```{r}
+#| fig-width: 9
+#| fig-height: 5
+pred_mejor <- filter(predicciones, Modelo == mejor_modelo)
+
+beneficio <- tibble(umbral = seq(0.05, 0.95, by = 0.01)) |>
+  mutate(
+    contactados = map_dbl(umbral, \(u) sum(pred_mejor$.pred_Fuga >= u)),
+    vp = map_dbl(umbral, \(u) {
+      sum(pred_mejor$.pred_Fuga >= u & pred_mejor$churn == "Fuga")
+    }),
+    beneficio = 100 * vp - 20 * contactados
+  )
+
+optimo <- slice_max(beneficio, beneficio, n = 1, with_ties = FALSE)
+beneficio_05 <- beneficio$beneficio[near(beneficio$umbral, 0.5)]
+
+ggplot(beneficio, aes(umbral, beneficio)) +
+  geom_line(color = "#790cee", linewidth = 1.2) +
+  geom_vline(xintercept = optimo$umbral, color = "red", linetype = "dashed") +
+  geom_vline(xintercept = 0.5, color = "gray50", linetype = "dotted") +
+  annotate(
+    "text",
+    x = optimo$umbral,
+    y = min(beneficio$beneficio),
+    hjust = -0.1,
+    label = paste("Umbral óptimo =", optimo$umbral),
+    color = "red"
+  ) +
+  labs(
+    title = paste(
+      "Beneficio de la campaña según el umbral de decisión:",
+      mejor_modelo
+    ),
+    x = "Umbral de probabilidad de fuga",
+    y = "Beneficio neto (USD)"
+  )
+```
+
+Con el umbral por defecto de 0.5 la campaña genera USD `r format(beneficio_05, big.mark = ".", decimal.mark = ",")`. Con el umbral óptimo de `r optimo$umbral` se contacta a `r optimo$contactados` clientes y el beneficio sube a USD `r format(optimo$beneficio, big.mark = ".", decimal.mark = ",")`. Como retener a un cliente vale cinco veces lo que cuesta contactarlo, conviene contactar a muchos más clientes de los que el umbral de 0.5 sugiere.
+
+Con el umbral óptimo, las métricas del modelo cambian: se sacrifica precisión a cambio de detectar a muchos más clientes que se van.
+
+```{r}
+pred_mejor |>
+  mutate(
+    .pred_class = factor(
+      if_else(.pred_Fuga >= optimo$umbral, "Fuga", "Permanece"),
+      levels = levels(churn)
+    )
+  ) |>
+  metric_set(accuracy, precision, sensitivity, specificity)(
+    truth = churn,
+    estimate = .pred_class,
+    event_level = "second"
+  ) |>
+  transmute(
+    metrica = recode(
+      .metric,
+      accuracy = "Exactitud",
+      precision = "Precisión",
+      sensitivity = "Sensibilidad",
+      specificity = "Especificidad"
+    ),
+    `umbral 0.5` = map_dbl(metrica, \(m) {
+      metricas[[m]][metricas$Modelo == mejor_modelo]
+    }),
+    `umbral óptimo` = .estimate
+  ) |>
+  mutate(across(where(is.numeric), \(x) round(x, 3)))
+```
+

@@ -1,0 +1,149 @@
+---
+title: "Análisis Predictivo en Business Intelligence: regresión en R"
+author: "Fernando Salcedo Mejía Eco, Ms"
+date: "Febrero 2026"
+lang: es
+format:
+  html:
+    toc: true
+    toc-depth: 2
+    number-sections: true
+    embed-resources: true
+    code-tools: true
+    df-print: kable
+execute:
+  warning: false
+  message: false
+---
+
+Este notebook desarrolla en R los casos de estudio de la presentación **Análisis Predictivo en Business Intelligence** con el enfoque [**tidymodels**](https://www.tidymodels.org/). Los datos son simulados con una semilla fija por el script `simular_datos.R`, que los guarda en la carpeta `datos/`. La versión en Python de este notebook lee los mismos archivos, por lo que ambos trabajan con exactamente los mismos datos.
+
+tidymodels organiza el modelado en piezas que se combinan siempre de la misma forma, sin importar el modelo:
+
+| Paquete | Pieza | Para qué sirve |
+|---|---|---|
+| `parsnip` | `linear_reg()` | Especificar el modelo y el motor que lo estima |
+| `broom` | `tidy()`, `glance()`, `augment()` | Convertir los resultados de los modelos en tablas |
+
+```{r}
+library(tidymodels)
+library(tidyverse)
+
+tidymodels_prefer() # en caso de conflicto, usar las funciones de tidymodels
+theme_set(theme_minimal(base_size = 13))
+```
+
+# Estimación y pronóstico de la demanda
+
+La gerencia de una tienda de electrónica quiere ajustar los precios de sus cinco productos estrella para el próximo trimestre. Para anticipar el efecto en las ventas se estima la **elasticidad precio de la demanda** de cada producto con un modelo log-log:
+
+$$
+\ln(Q) = \beta_1 + \beta_2 \ln(P) + \varepsilon, \qquad E_p = \beta_2
+$$
+
+## Datos
+
+Ventas mensuales de cada producto entre 2016 y 2023.
+
+```{r}
+ventas <- read_csv("datos/ventas_electronica.csv", show_col_types = FALSE)
+head(ventas)
+```
+
+```{r}
+#| fig-width: 11
+#| fig-height: 6
+ggplot(ventas, aes(log(precio), log(cantidad))) +
+  geom_point(color = "skyblue", alpha = 0.7) +
+  geom_smooth(method = "lm", color = "red", linewidth = 0.8) +
+  facet_wrap(~producto, scales = "free") +
+  labs(
+    title = "Relación log-log entre precio y cantidad vendida",
+    x = "ln(precio)",
+    y = "ln(cantidad)"
+  )
+```
+
+## Estimación de la elasticidad
+
+Se especifica una regresión lineal con `parsnip` y se ajusta una vez por producto: `nest()` guarda los datos de cada producto en una lista y `map()` ajusta el modelo a cada uno. El coeficiente de $\ln(P)$ es la elasticidad.
+
+```{r}
+modelo_lm <- linear_reg() |>
+  set_engine("lm")
+
+ajustes_demanda <- ventas |>
+  nest(datos = -producto) |>
+  mutate(
+    ajuste = map(datos, \(d) {
+      fit(modelo_lm, log(cantidad) ~ log(precio), data = d)
+    }),
+    coeficientes = map(ajuste, \(m) tidy(m, conf.int = TRUE)),
+    r2 = map_dbl(ajuste, \(m) glance(m)$r.squared)
+  )
+
+elasticidades <- ajustes_demanda |>
+  unnest(coeficientes) |>
+  filter(term == "log(precio)") |>
+  select(producto, elasticidad = estimate, conf.low, conf.high, p.value, r2) |>
+  arrange(producto)
+
+elasticidades |> mutate(across(where(is.numeric), \(x) round(x, 3)))
+```
+
+Todas las elasticidades son negativas y significativas, como predice la **ley de la demanda**. Por ejemplo, para los audífonos un aumento del 1 % en el precio reduce la cantidad vendida en cerca de `r round(-elasticidades$elasticidad[elasticidades$producto == "Audífonos"], 1)` %.
+
+## Del modelo a la decisión de precios
+
+Como el ingreso es $I = P \cdot Q$ y $Q \propto P^{E_p}$, el ingreso varía según $P^{1 + E_p}$:
+
+- **Demanda elástica** ($E_p < -1$): bajar el precio **aumenta** el ingreso.
+- **Demanda inelástica** ($-1 < E_p < 0$): subir el precio **aumenta** el ingreso.
+
+```{r}
+elasticidades |>
+  transmute(
+    producto,
+    elasticidad = round(elasticidad, 2),
+    tipo = if_else(elasticidad < -1, "Elástica", "Inelástica"),
+    `Δ% ingreso si el precio sube 5 %` = round(
+      (1.05^(1 + elasticidad) - 1) * 100,
+      1
+    ),
+    `Δ% ingreso si el precio baja 5 %` = round(
+      (0.95^(1 + elasticidad) - 1) * 100,
+      1
+    ),
+    recomendacion = if_else(elasticidad < -1, "Bajar precio", "Subir precio")
+  )
+```
+
+Antes de decidir conviene mirar los intervalos de confianza: para `r with(elasticidades, paste(producto[conf.low < -1 & conf.high > -1], collapse = " y "))` el intervalo incluye $E_p = -1$, por lo que no se puede afirmar si la demanda es elástica o inelástica y el efecto de un cambio de precio sobre el ingreso es pequeño e incierto.
+
+## Pronóstico con el modelo
+
+Con `predict()` se pronostica la cantidad para un precio nuevo. Por ejemplo, el efecto de bajar 5 % el precio de los audífonos respecto a su precio promedio:
+
+```{r}
+ajuste_audifonos <- ajustes_demanda |>
+  filter(producto == "Audífonos") |>
+  pull(ajuste) |>
+  pluck(1)
+
+precio_medio <- mean(ventas$precio[ventas$producto == "Audífonos"])
+
+escenarios <- tibble(
+  escenario = c("Precio promedio", "Precio -5 %"),
+  precio = precio_medio * c(1, 0.95)
+)
+
+escenarios |>
+  bind_cols(predict(ajuste_audifonos, new_data = escenarios)) |>
+  mutate(
+    cantidad = exp(.pred),
+    ingreso = precio * cantidad,
+    across(where(is.numeric), \(x) round(x, 1))
+  ) |>
+  select(-.pred)
+```
+

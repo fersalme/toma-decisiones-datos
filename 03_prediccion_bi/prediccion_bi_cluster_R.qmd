@@ -1,0 +1,187 @@
+---
+title: "Análisis Predictivo en Business Intelligence: segmentación (cluster) en R"
+author: "Fernando Salcedo Mejía Eco, Ms"
+date: "Febrero 2026"
+lang: es
+format:
+  html:
+    toc: true
+    toc-depth: 2
+    number-sections: true
+    embed-resources: true
+    code-tools: true
+    df-print: kable
+execute:
+  warning: false
+  message: false
+---
+
+Este notebook desarrolla en R los casos de estudio de la presentación **Análisis Predictivo en Business Intelligence** con el enfoque [**tidymodels**](https://www.tidymodels.org/). Los datos son simulados con una semilla fija por el script `simular_datos.R`, que los guarda en la carpeta `datos/`. La versión en Python de este notebook lee los mismos archivos, por lo que ambos trabajan con exactamente los mismos datos.
+
+tidymodels organiza el modelado en piezas que se combinan siempre de la misma forma, sin importar el modelo:
+
+| Paquete | Pieza | Para qué sirve |
+|---|---|---|
+| `recipes` | `recipe()`, `step_*()` | Definir el preprocesamiento (roles, transformaciones, estandarización) |
+| `stats` | `kmeans()` | Estimar los grupos con k-means |
+| `broom` | `tidy()`, `glance()`, `augment()` | Convertir los resultados de los modelos en tablas |
+
+```{r}
+library(tidymodels)
+library(tidyverse)
+library(cluster)
+
+tidymodels_prefer() # en caso de conflicto, usar las funciones de tidymodels
+theme_set(theme_minimal(base_size = 13))
+```
+
+# Segmentación de clientes (RFM)
+
+El área de marketing de una cadena de retail quiere diseñar acciones diferenciadas según el comportamiento de compra de sus clientes: **recencia**, **frecuencia** y **ticket promedio**.
+
+## Datos
+
+```{r}
+retail <- read_csv("datos/retail_rfm.csv", show_col_types = FALSE)
+summary(select(retail, -id_cliente))
+```
+
+## Estandarización con una receta
+
+k-means usa distancias, así que las variables se estandarizan con `step_normalize()`. Al preparar la receta (`prep()`) se guardan la media y la desviación de cada variable, que después se reutilizan para estandarizar clientes nuevos.
+
+```{r}
+variables_rfm <- c("recencia", "frecuencia", "ticket_promedio")
+
+receta_rfm <- recipe(
+  ~ recencia + frecuencia + ticket_promedio,
+  data = retail
+) |>
+  step_normalize(all_numeric_predictors()) |>
+  prep()
+
+X_rfm <- bake(receta_rfm, new_data = NULL)
+
+tidy(receta_rfm, number = 1) |> select(variable = terms, statistic, value)
+```
+
+## Elegir el número de grupos
+
+Se estima k-means para $k = 2, \dots, 8$, con 10 inicializaciones aleatorias cada uno (`nstart`). `glance()` entrega la inercia (`tot.withinss`) de cada modelo.
+
+```{r}
+#| fig-width: 11
+#| fig-height: 4.5
+distancias <- dist(X_rfm)
+
+set.seed(2026)
+seleccion_k <- tibble(k = 2:8) |>
+  mutate(
+    modelo = map(k, \(k) kmeans(X_rfm, centers = k, nstart = 10)),
+    `Inercia (WCSS)` = map_dbl(modelo, \(m) glance(m)$tot.withinss),
+    `Silueta promedio` = map_dbl(modelo, \(m) {
+      mean(silhouette(m$cluster, distancias)[, "sil_width"])
+    })
+  )
+
+seleccion_k |>
+  select(-modelo) |>
+  pivot_longer(-k, names_to = "criterio", values_to = "valor") |>
+  ggplot(aes(k, valor)) +
+  geom_line(color = "#790cee", linewidth = 1) +
+  geom_point(color = "#790cee", size = 2.5) +
+  facet_wrap(~criterio, scales = "free_y") +
+  labs(
+    title = "Método del codo y coeficiente de silueta",
+    x = "Número de grupos (k)",
+    y = NULL
+  )
+```
+
+El codo aparece en $k = `r seleccion_k$k[which.max(seleccion_k[["Silueta promedio"]])]`$, que también maximiza la silueta.
+
+## Estimación y perfil de los segmentos
+
+`augment()` agrega a los datos la columna `.cluster` con el grupo asignado a cada cliente.
+
+```{r}
+set.seed(2026)
+kmeans_rfm <- kmeans(X_rfm, centers = 4, nstart = 10)
+
+# Nombrar los segmentos ordenándolos por recencia (de más a menos reciente)
+nombres <- c("Campeones", "Leales", "Ocasionales de alto ticket", "Inactivos")
+
+retail <- augment(kmeans_rfm, retail) |>
+  rename(grupo = .cluster)
+
+perfil <- retail |>
+  group_by(grupo) |>
+  summarise(across(all_of(variables_rfm), mean), clientes = n()) |>
+  mutate(pct_clientes = clientes / sum(clientes) * 100) |>
+  arrange(recencia) |>
+  mutate(segmento = factor(nombres, levels = nombres))
+
+retail <- left_join(retail, select(perfil, grupo, segmento), by = "grupo")
+
+perfil |>
+  select(segmento, all_of(variables_rfm), clientes, pct_clientes) |>
+  mutate(across(where(is.numeric), \(x) round(x, 1)))
+```
+
+## Visualización de los segmentos
+
+```{r}
+#| fig-width: 11
+#| fig-height: 5
+colores <- c("#790cee", "skyblue", "orange", "salmon")
+
+ggplot(retail, aes(recencia, frecuencia, color = segmento)) +
+  geom_point(size = 1.2, alpha = 0.6) +
+  scale_color_manual(values = colores) +
+  labs(
+    title = "Recencia vs. frecuencia",
+    x = "Recencia (días)",
+    y = "Frecuencia (compras al año)",
+    color = NULL
+  )
+
+ggplot(retail, aes(frecuencia, ticket_promedio, color = segmento)) +
+  geom_point(size = 1.2, alpha = 0.6) +
+  scale_color_manual(values = colores) +
+  labs(
+    title = "Frecuencia vs. ticket promedio",
+    x = "Frecuencia (compras al año)",
+    y = "Ticket promedio (USD)",
+    color = NULL
+  )
+```
+
+## Asignar un cliente nuevo
+
+Un cliente nuevo se estandariza con la **misma receta** (`bake()` usa la media y la desviación de los datos originales) y se asigna al **centroide más cercano**. Los centroides se obtienen con `tidy()`.
+
+```{r}
+nuevo <- tibble(recencia = 15, frecuencia = 20, ticket_promedio = 110)
+nuevo_z <- bake(receta_rfm, new_data = nuevo)
+
+tidy(kmeans_rfm) |>
+  mutate(
+    distancia = sqrt(
+      (recencia - nuevo_z$recencia)^2 +
+        (frecuencia - nuevo_z$frecuencia)^2 +
+        (ticket_promedio - nuevo_z$ticket_promedio)^2
+    )
+  ) |>
+  slice_min(distancia, n = 1) |>
+  left_join(select(perfil, grupo, segmento), by = c("cluster" = "grupo")) |>
+  transmute(segmento, distancia = round(distancia, 3))
+```
+
+## Acciones por segmento
+
+| Segmento | Acción comercial sugerida |
+|---|---|
+| **Campeones** | Programa de fidelización, acceso anticipado a lanzamientos, embajadores de marca |
+| **Leales** | Venta cruzada y venta adicional para subir el ticket |
+| **Ocasionales de alto ticket** | Recordatorios personalizados y beneficios por recompra para aumentar la frecuencia |
+| **Inactivos** | Campaña de reactivación de bajo costo; si no responden, reducir inversión |

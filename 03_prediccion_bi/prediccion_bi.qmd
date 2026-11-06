@@ -5,12 +5,12 @@ afi: "Escuela de Transformación Digital - ETD | Programa de Ciencia de Datos"
 date: "Febrero 2026"
 format:
   revealjs:
-    theme: [default, style.scss]
+    theme: [default, ../recursos/style.scss]
     slide-number: true
     transition: slide
     scrollable: true
     background-transition: fade
-    logo: logo_utb.png
+    logo: ../recursos/logo_utb.png
     footer: "UTB-ETD | Programa de Ciencia de Datos"
     incremental: false
     smaller: false
@@ -18,17 +18,17 @@ format:
     echo: true
     code-fold: true
 title-slide-attributes:
-    data-background-image: plantilla-inicio.png
+    data-background-image: ../recursos/plantilla-inicio.png
     data-background-opacity: "0.6"
 ---
 
 ## Toma de decisiones en Business Intelligence
 
-![](bi.png)
+![](../recursos/bi.png)
 
 ## Tipo de datos
 
-![](taxo_data.png)
+![](img/taxo_data.png)
 
 ## Modelación estadística en Business Intelligence
 
@@ -49,7 +49,7 @@ $$
 
 ## Esquema de la regresión
 
-![](reg_lineal.png)
+![](img/reg_lineal.png)
 
 ## Uso de la regresión
 

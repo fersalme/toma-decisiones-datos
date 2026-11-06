@@ -5,12 +5,12 @@ afi: "Escuela de Transformación Digital - ETD | Programa de Ciencia de Datos"
 date: "Febrero 2026"
 format:
   revealjs:
-    theme: [default, style.scss]
+    theme: [default, ../recursos/style.scss]
     slide-number: true
     transition: slide
     scrollable: true
     background-transition: fade
-    logo: logo_utb.png
+    logo: ../recursos/logo_utb.png
     footer: "UTB-ETD | Programa de Ciencia de Datos"
     incremental: false
     smaller: false
@@ -18,13 +18,13 @@ format:
     echo: true
     code-fold: true
 title-slide-attributes:
-    data-background-image: plantilla-inicio.png
+    data-background-image: ../recursos/plantilla-inicio.png
     data-background-opacity: "0.6"
 ---
 
 ## Toma de decisiones en Business Intelligence
 
-![](bi.png)
+![](../recursos/bi.png)
 
 ## Toma de desición y soporte en datos
 
@@ -41,7 +41,7 @@ La toma de decisiones es un proceso de elección **entre dos o más cursos de ac
 
 ## El proceso de toma de decisiones
 
-![](decision-making.png)
+![](img/decision-making.png)
 
 ## El proceso de toma de decisiones
 
@@ -60,7 +60,7 @@ La toma de decisiones es un proceso de elección **entre dos o más cursos de ac
 
 ## Espacio de toma de decisiones según la conocimiento
 
-![](risk.png)
+![](img/risk.png)
 
 ## Espacio de toma de decisiones según la conocimiento
 
@@ -74,7 +74,7 @@ La toma de decisiones es un proceso de elección **entre dos o más cursos de ac
 
 ## Modelar la toma de decisiones
 
-![](estructura-modelo.png)
+![](img/estructura-modelo.png)
 
 ## Modelar la toma de decisiones
 
