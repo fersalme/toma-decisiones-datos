@@ -1,0 +1,236 @@
+---
+title: "Análisis Predictivo en Business Intelligence: regresión en Python"
+author: "Fernando Salcedo Mejía Eco, Ms"
+date: "Febrero 2026"
+lang: es
+format:
+  html:
+    toc: true
+    toc-depth: 2
+    number-sections: true
+    embed-resources: true
+    code-tools: true
+jupyter: python3
+execute:
+  warning: false
+  message: false
+---
+
+Este notebook desarrolla en Python el caso de estudio de regresión de la presentación **Análisis Predictivo en Business Intelligence**. El modelo se estima con [**statsmodels**](https://www.statsmodels.org/) y los datos se manipulan con **pandas**. Es la versión en Python del notebook de regresión en R: usa los mismos datos y llega a los mismos resultados.
+
+Las funciones de statsmodels que se usan con un modelo de regresión lineal son:
+
+| Función | Equivalente en R | Para qué sirve |
+|---|---|---|
+| `smf.ols(...).fit()` | `lm()` | Estimar la regresión lineal por mínimos cuadrados |
+| `.summary()` | `summary()` | Ver coeficientes, errores estándar, valores p y $R^2$ |
+| `.params`, `.conf_int()` | `coef()`, `confint()` | Extraer los coeficientes y sus intervalos de confianza |
+| `.pvalues`, `.rsquared` | `summary()` | Extraer los valores p y el $R^2$ |
+| `.predict()` | `predict()` | Pronosticar la respuesta para datos nuevos |
+
+```{python}
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import seaborn as sns
+import statsmodels.formula.api as smf
+
+sns.set_theme(style="whitegrid", font_scale=1.1)
+pd.set_option("display.precision", 3)
+```
+
+# Estimación y pronóstico de la demanda
+
+La gerencia de una tienda de electrónica quiere ajustar los precios de sus cinco productos estrella para el próximo trimestre. Para anticipar el efecto en las ventas se estima la **elasticidad precio de la demanda** de cada producto con un modelo log-log:
+
+$$
+\ln(Q) = \beta_1 + \beta_2 \ln(P) + \varepsilon, \qquad E_p = \beta_2
+$$
+
+## Datos
+
+Ventas mensuales de cada producto entre 2016 y 2023.
+
+```{python}
+ventas = pd.read_csv("datos/ventas_electronica.csv", parse_dates=["fecha"])
+ventas.head()
+```
+
+```{python}
+#| fig-width: 11
+#| fig-height: 6
+ventas_log = ventas.assign(
+    ln_precio=np.log(ventas["precio"]),
+    ln_cantidad=np.log(ventas["cantidad"]),
+)
+
+g = sns.lmplot(
+    data=ventas_log,
+    x="ln_precio",
+    y="ln_cantidad",
+    col="producto",
+    col_wrap=3,
+    height=3.2,
+    aspect=1.2,
+    facet_kws={"sharex": False, "sharey": False},
+    scatter_kws={"color": "skyblue", "alpha": 0.7, "s": 18},
+    line_kws={"color": "red", "linewidth": 1},
+)
+g.set_titles("{col_name}")
+g.set_axis_labels("ln(precio)", "ln(cantidad)")
+g.figure.suptitle("Relación log-log entre precio y cantidad vendida", y=1.02)
+plt.show()
+```
+
+## Estimación de la elasticidad
+
+Se estima una regresión con `smf.ols()` por producto. El coeficiente de $\ln(P)$ es la elasticidad. Un ciclo `for` recorre los productos y en cada vuelta:
+
+1. Filtra las ventas del producto.
+2. Estima el modelo log-log con `smf.ols().fit()` y lo guarda en el diccionario `ajustes_demanda`.
+3. Extrae la elasticidad, su intervalo de confianza, el valor p y el $R^2$, y los agrega como una fila a la lista `filas`, que al final se convierte en la tabla `elasticidades`.
+
+```{python}
+productos = sorted(ventas["producto"].unique())
+termino = "np.log(precio)"  # nombre del coeficiente de ln(P) en el modelo
+
+ajustes_demanda = {}  # aquí se guarda el modelo de cada producto
+filas = []  # aquí se acumula una fila por producto
+
+for p in productos:
+    # 1. Datos del producto
+    datos_p = ventas[ventas["producto"] == p]
+
+    # 2. Estimar el modelo log-log
+    modelo = smf.ols("np.log(cantidad) ~ np.log(precio)", data=datos_p).fit()
+    ajustes_demanda[p] = modelo
+
+    # 3. Extraer los resultados del coeficiente de log(precio)
+    ic = modelo.conf_int().loc[termino]
+
+    resultado = {
+        "producto": p,
+        "elasticidad": modelo.params[termino],
+        "conf_low": ic[0],
+        "conf_high": ic[1],
+        "p_value": modelo.pvalues[termino],
+        "r2": modelo.rsquared,
+    }
+    filas.append(resultado)
+
+elasticidades = pd.DataFrame(filas)
+elasticidades
+```
+
+Este es el resultado completo de `.summary()` para uno de los modelos guardados:
+
+```{python}
+print(ajustes_demanda["Audífonos"].summary())
+```
+
+```{python}
+#| echo: false
+e_aud = elasticidades.set_index("producto").loc["Audífonos", "elasticidad"]
+```
+
+Todas las elasticidades son negativas y significativas, como predice la **ley de la demanda**. Por ejemplo, para los audífonos un aumento del 1 % en el precio reduce la cantidad vendida en cerca de `{python} f"{-e_aud:.1f}"` %.
+
+## Usar el modelo para la toma de decisión de precios
+
+La pregunta de la gerencia es: **si cambio el precio, ¿qué pasa con el ingreso?** Como el modelo está en logaritmos, todo se puede razonar con **tasas de cambio** (cambios porcentuales), que se suman y se multiplican de forma lineal.
+
+**Paso 1. La elasticidad convierte la tasa del precio en tasa de la cantidad.** En el modelo log-log, un cambio en $\ln(P)$ produce un cambio $E_p$ veces mayor en $\ln(Q)$. Como el cambio en el logaritmo es aproximadamente la tasa de cambio:
+
+$$
+\%\Delta Q \approx E_p \cdot \%\Delta P
+$$
+
+**Paso 2. La tasa del ingreso es la suma de las tasas del precio y de la cantidad.** El ingreso es $I = P \cdot Q$; al tomar logaritmos el producto se vuelve una suma, $\ln(I) = \ln(P) + \ln(Q)$, y por tanto:
+
+$$
+\%\Delta I \approx \%\Delta P + \%\Delta Q
+$$
+
+**Paso 3. Reemplazar el paso 1 en el paso 2.**
+
+$$
+\%\Delta I \approx \%\Delta P + E_p \cdot \%\Delta P = (1 + E_p) \cdot \%\Delta P
+$$
+
+El ingreso cambia en proporción al cambio del precio, y el término $(1 + E_p)$ dice en qué dirección:
+
+| Tipo de demanda | Elasticidad | $1 + E_p$ | Si el precio sube | Decisión |
+|---|---|---|---|---|
+| **Elástica** | $E_p < -1$ | negativo | la cantidad cae más que lo que sube el precio: el ingreso **baja** | Bajar el precio |
+| **Inelástica** | $-1 < E_p < 0$ | positivo | la cantidad cae menos que lo que sube el precio: el ingreso **sube** | Subir el precio |
+
+La aproximación es buena para cambios pequeños de precio (alrededor de ±10 %). Para cambios grandes conviene calcular el ingreso con `.predict()`, como en la sección siguiente.
+
+### Ejemplo con los audífonos
+
+Se aplican los tres pasos con la elasticidad estimada de los audífonos para una subida de precio del 5 %:
+
+```{python}
+cambio_precio = 5  # el precio sube 5 %
+
+cambio_cantidad = e_aud * cambio_precio  # paso 1
+cambio_ingreso = cambio_precio + cambio_cantidad  # pasos 2 y 3
+
+pd.DataFrame({
+    "elasticidad": [e_aud],
+    "%Δ precio": [cambio_precio],
+    "%Δ cantidad": [cambio_cantidad],
+    "%Δ ingreso": [cambio_ingreso],
+}).round(2)
+```
+
+El precio sube 5 % y la cantidad cae cerca de `{python} f"{-e_aud * 5:.1f}"` %, así que el ingreso cambia `{python} f"{(1 + e_aud) * 5:.1f}"` %: la demanda de los audífonos es elástica y conviene **bajar** el precio.
+
+### Todos los productos
+
+Se escribe el paso 3 como una función y se aplica a cada producto:
+
+```{python}
+def cambio_ingreso(cambio_precio, elasticidad):
+    return (1 + elasticidad) * cambio_precio
+
+
+ep = elasticidades["elasticidad"]
+
+pd.DataFrame({
+    "producto": elasticidades["producto"],
+    "elasticidad": ep.round(2),
+    "tipo": np.where(ep < -1, "Elástica", "Inelástica"),
+    "%Δ ingreso si el precio sube 5 %": cambio_ingreso(5, ep).round(1),
+    "%Δ ingreso si el precio baja 5 %": cambio_ingreso(-5, ep).round(1),
+    "recomendacion": np.where(ep < -1, "Bajar precio", "Subir precio"),
+})
+```
+
+```{python}
+#| echo: false
+incluye_uno = elasticidades.query("conf_low < -1 and conf_high > -1")["producto"].tolist()
+texto_incluye_uno = " y ".join(incluye_uno) if incluye_uno else "ningún producto"
+```
+
+Antes de decidir conviene mirar los intervalos de confianza: para `{python} texto_incluye_uno` el intervalo incluye $E_p = -1$, por lo que no se puede afirmar si la demanda es elástica o inelástica y el efecto de un cambio de precio sobre el ingreso es pequeño e incierto.
+
+## Pronóstico con el modelo
+
+Con `.predict()` se pronostica la cantidad para un precio nuevo. Por ejemplo, el efecto de bajar 5 % el precio de los audífonos respecto a su precio promedio:
+
+```{python}
+ajuste_audifonos = ajustes_demanda["Audífonos"]
+
+precio_medio = ventas.loc[ventas["producto"] == "Audífonos", "precio"].mean()
+
+escenarios = pd.DataFrame({
+    "escenario": ["Precio promedio", "Precio -5 %"],
+    "precio": [precio_medio, precio_medio * 0.95],
+})
+
+# El modelo predice ln(cantidad); con np.exp() se vuelve a unidades
+escenarios["cantidad"] = np.exp(ajuste_audifonos.predict(escenarios))
+escenarios["ingreso"] = escenarios["precio"] * escenarios["cantidad"]
+escenarios.round(1)
+```

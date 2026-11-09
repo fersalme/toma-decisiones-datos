@@ -1,0 +1,53 @@
+---
+title: "Análisis Predictivo en Business Intelligence"
+subtitle: "Índice de materiales por tema y lenguaje"
+author: "Fernando Salcedo Mejía Eco, Ms"
+date: "Febrero 2026"
+lang: es
+format:
+  html:
+    toc: true
+    toc-depth: 2
+    embed-resources: true
+---
+
+Este índice reúne los materiales del tema **Análisis Predictivo en Business Intelligence**: la presentación y los notebooks de ejemplo, organizados por tema y lenguaje de programación. Todos los notebooks trabajan con los mismos datos simulados de la carpeta `datos/`, generados por el script `simular_datos.R`.
+
+# Presentación
+
+| Material | Descripción |
+|---|---|
+| [Análisis Predictivo en Business Intelligence](prediccion_bi.html) | Diapositivas del tema: regresión, modelos de clasificación, estadísticos de rendimiento y agrupamiento k-means |
+
+# Ejemplos por tema y lenguaje
+
+| Tema | Caso de estudio | R | Python |
+|---|---|---|---|
+| **Regresión** | Estimación y pronóstico de la demanda | [Regresión en R](prediccion_bi_regresion_R.html) | [Regresión en Python](prediccion_bi_regresion_python.html) |
+| **Clasificación** | Fuga de clientes (churn) | [Clasificación en R](prediccion_bi_clasificacion_R.html) | Pendiente |
+| **Agrupamiento (cluster)** | Segmentación de clientes (RFM) | [Segmentación en R](prediccion_bi_cluster_R.html) | Pendiente |
+
+## Regresión
+
+Estimación de la **elasticidad precio de la demanda** de cinco productos de una tienda de electrónica con un modelo log-log, y su uso para simular decisiones de precio y pronosticar ventas.
+
+- **R:** [prediccion_bi_regresion_R.html](prediccion_bi_regresion_R.html)
+- **Python:** [prediccion_bi_regresion_python.html](prediccion_bi_regresion_python.html)
+- **Datos:** `datos/ventas_electronica.csv`
+
+## Clasificación
+
+Comparación de **regresión logística, árbol de clasificación, random forest y XGBoost** para identificar los clientes de una empresa de telecomunicaciones con mayor probabilidad de fuga, con matriz de confusión, curva ROC y elección del umbral.
+
+- **R:** [prediccion_bi_clasificacion_R.html](prediccion_bi_clasificacion_R.html)
+- **Python:** pendiente
+- **Datos:** `datos/telco_churn.csv`
+
+## Agrupamiento (cluster)
+
+Segmentación de los clientes de una cadena de retail con **k-means** a partir de recencia, frecuencia y ticket promedio (RFM), elección del número de grupos y acciones comerciales por segmento.
+
+- **R:** [prediccion_bi_cluster_R.html](prediccion_bi_cluster_R.html)
+- **Python:** pendiente
+- **Datos:** `datos/retail_rfm.csv`
+

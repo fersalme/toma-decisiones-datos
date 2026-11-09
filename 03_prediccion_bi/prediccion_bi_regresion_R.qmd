@@ -16,20 +16,20 @@ execute:
   message: false
 ---
 
-Este notebook desarrolla en R los casos de estudio de la presentación **Análisis Predictivo en Business Intelligence** con el enfoque [**tidymodels**](https://www.tidymodels.org/). Los datos son simulados con una semilla fija por el script `simular_datos.R`, que los guarda en la carpeta `datos/`. La versión en Python de este notebook lee los mismos archivos, por lo que ambos trabajan con exactamente los mismos datos.
+Este notebook desarrolla en R el caso de estudio de regresión de la presentación **Análisis Predictivo en Business Intelligence**. El modelo se estima con la función `lm()` de R base y los datos se manipulan con el [**tidyverse**](https://www.tidyverse.org/).
 
-tidymodels organiza el modelado en piezas que se combinan siempre de la misma forma, sin importar el modelo:
+Las funciones de R base que se usan con un modelo estimado con `lm()` son:
 
-| Paquete | Pieza | Para qué sirve |
-|---|---|---|
-| `parsnip` | `linear_reg()` | Especificar el modelo y el motor que lo estima |
-| `broom` | `tidy()`, `glance()`, `augment()` | Convertir los resultados de los modelos en tablas |
+| Función | Para qué sirve |
+|---|---|
+| `lm()` | Estimar la regresión lineal por mínimos cuadrados |
+| `summary()` | Ver coeficientes, errores estándar, valores p y $R^2$ |
+| `coef()`, `confint()` | Extraer los coeficientes y sus intervalos de confianza |
+| `predict()` | Pronosticar la respuesta para datos nuevos |
 
 ```{r}
-library(tidymodels)
 library(tidyverse)
 
-tidymodels_prefer() # en caso de conflicto, usar las funciones de tidymodels
 theme_set(theme_minimal(base_size = 13))
 ```
 
@@ -66,54 +66,121 @@ ggplot(ventas, aes(log(precio), log(cantidad))) +
 
 ## Estimación de la elasticidad
 
-Se especifica una regresión lineal con `parsnip` y se ajusta una vez por producto: `nest()` guarda los datos de cada producto en una lista y `map()` ajusta el modelo a cada uno. El coeficiente de $\ln(P)$ es la elasticidad.
+Se estima una regresión con `lm()` por producto. El coeficiente de $\ln(P)$ es la elasticidad. Un ciclo `for()` recorre los productos y en cada vuelta:
+
+1. Filtra las ventas del producto.
+2. Estima el modelo log-log con `lm()` y lo guarda en la lista `ajustes_demanda`.
+3. Extrae la elasticidad, su intervalo de confianza, el valor p y el $R^2$, y los agrega como una fila a la tabla `elasticidades`.
 
 ```{r}
-modelo_lm <- linear_reg() |>
-  set_engine("lm")
+productos <- sort(unique(ventas$producto))
 
-ajustes_demanda <- ventas |>
-  nest(datos = -producto) |>
-  mutate(
-    ajuste = map(datos, \(d) {
-      fit(modelo_lm, log(cantidad) ~ log(precio), data = d)
-    }),
-    coeficientes = map(ajuste, \(m) tidy(m, conf.int = TRUE)),
-    r2 = map_dbl(ajuste, \(m) glance(m)$r.squared)
+ajustes_demanda <- list() # aquí se guarda el modelo de cada producto
+elasticidades <- tibble() # aquí se acumula una fila por producto
+
+for (p in productos) {
+  # 1. Datos del producto
+  datos_p <- filter(ventas, producto == p)
+
+  # 2. Estimar el modelo log-log
+  modelo <- lm(log(cantidad) ~ log(precio), data = datos_p)
+  ajustes_demanda[[p]] <- modelo
+
+  # 3. Extraer los resultados del coeficiente de log(precio)
+  ic <- confint(modelo)["log(precio)", ]
+  resumen <- summary(modelo)
+
+  resultado <- tibble(
+    producto = p,
+    elasticidad = coef(modelo)[["log(precio)"]],
+    conf.low = ic[[1]],
+    conf.high = ic[[2]],
+    p.value = resumen$coefficients["log(precio)", "Pr(>|t|)"],
+    r2 = resumen$r.squared
   )
+  elasticidades <- bind_rows(elasticidades, resultado)
+}
 
-elasticidades <- ajustes_demanda |>
-  unnest(coeficientes) |>
-  filter(term == "log(precio)") |>
-  select(producto, elasticidad = estimate, conf.low, conf.high, p.value, r2) |>
-  arrange(producto)
+elasticidades
+```
 
-elasticidades |> mutate(across(where(is.numeric), \(x) round(x, 3)))
+Este es el resultado completo de `summary()` para uno de los modelos guardados:
+
+```{r}
+summary(ajustes_demanda[["Audífonos"]])
 ```
 
 Todas las elasticidades son negativas y significativas, como predice la **ley de la demanda**. Por ejemplo, para los audífonos un aumento del 1 % en el precio reduce la cantidad vendida en cerca de `r round(-elasticidades$elasticidad[elasticidades$producto == "Audífonos"], 1)` %.
 
-## Del modelo a la decisión de precios
+## Usar el modelo para la toma de decisión de precios
 
-Como el ingreso es $I = P \cdot Q$ y $Q \propto P^{E_p}$, el ingreso varía según $P^{1 + E_p}$:
+La pregunta de la gerencia es: **si cambio el precio, ¿qué pasa con el ingreso?** Como el modelo está en logaritmos, todo se puede razonar con **tasas de cambio** (cambios porcentuales), que se suman y se multiplican de forma lineal.
 
-- **Demanda elástica** ($E_p < -1$): bajar el precio **aumenta** el ingreso.
-- **Demanda inelástica** ($-1 < E_p < 0$): subir el precio **aumenta** el ingreso.
+**Paso 1. La elasticidad convierte la tasa del precio en tasa de la cantidad.** En el modelo log-log, un cambio en $\ln(P)$ produce un cambio $E_p$ veces mayor en $\ln(Q)$. Como el cambio en el logaritmo es aproximadamente la tasa de cambio:
+
+$$
+\%\Delta Q \approx E_p \cdot \%\Delta P
+$$
+
+**Paso 2. La tasa del ingreso es la suma de las tasas del precio y de la cantidad.** El ingreso es $I = P \cdot Q$; al tomar logaritmos el producto se vuelve una suma, $\ln(I) = \ln(P) + \ln(Q)$, y por tanto:
+
+$$
+\%\Delta I \approx \%\Delta P + \%\Delta Q
+$$
+
+**Paso 3. Reemplazar el paso 1 en el paso 2.**
+
+$$
+\%\Delta I \approx \%\Delta P + E_p \cdot \%\Delta P = (1 + E_p) \cdot \%\Delta P
+$$
+
+El ingreso cambia en proporción al cambio del precio, y el término $(1 + E_p)$ dice en qué dirección:
+
+| Tipo de demanda | Elasticidad | $1 + E_p$ | Si el precio sube | Decisión |
+|---|---|---|---|---|
+| **Elástica** | $E_p < -1$ | negativo | la cantidad cae más que lo que sube el precio: el ingreso **baja** | Bajar el precio |
+| **Inelástica** | $-1 < E_p < 0$ | positivo | la cantidad cae menos que lo que sube el precio: el ingreso **sube** | Subir el precio |
+
+La aproximación es buena para cambios pequeños de precio (alrededor de ±10 %). Para cambios grandes conviene calcular el ingreso con `predict()`, como en la sección siguiente.
+
+### Ejemplo con los audífonos
+
+Se aplican los tres pasos con la elasticidad estimada de los audífonos para una subida de precio del 5 %:
 
 ```{r}
+e_aud <- elasticidades$elasticidad[elasticidades$producto == "Audífonos"]
+cambio_precio <- 5 # el precio sube 5 %
+
+cambio_cantidad <- e_aud * cambio_precio         # paso 1
+cambio_ingreso <- cambio_precio + cambio_cantidad # pasos 2 y 3
+
+tibble(
+  elasticidad = e_aud,
+  `%Δ precio` = cambio_precio,
+  `%Δ cantidad` = cambio_cantidad,
+  `%Δ ingreso` = cambio_ingreso
+) |>
+  round(2)
+```
+
+El precio sube 5 % y la cantidad cae cerca de `r round(-e_aud * 5, 1)` %, así que el ingreso cambia `r round((1 + e_aud) * 5, 1)` %: la demanda de los audífonos es elástica y conviene **bajar** el precio.
+
+### Todos los productos
+
+Se escribe el paso 3 como una función y se aplica a cada producto:
+
+```{r}
+cambio_ingreso <- function(cambio_precio, elasticidad) {
+  (1 + elasticidad) * cambio_precio
+}
+
 elasticidades |>
   transmute(
     producto,
     elasticidad = round(elasticidad, 2),
     tipo = if_else(elasticidad < -1, "Elástica", "Inelástica"),
-    `Δ% ingreso si el precio sube 5 %` = round(
-      (1.05^(1 + elasticidad) - 1) * 100,
-      1
-    ),
-    `Δ% ingreso si el precio baja 5 %` = round(
-      (0.95^(1 + elasticidad) - 1) * 100,
-      1
-    ),
+    `%Δ ingreso si el precio sube 5 %` = round(cambio_ingreso(5, elasticidad), 1),
+    `%Δ ingreso si el precio baja 5 %` = round(cambio_ingreso(-5, elasticidad), 1),
     recomendacion = if_else(elasticidad < -1, "Bajar precio", "Subir precio")
   )
 ```
@@ -125,10 +192,7 @@ Antes de decidir conviene mirar los intervalos de confianza: para `r with(elasti
 Con `predict()` se pronostica la cantidad para un precio nuevo. Por ejemplo, el efecto de bajar 5 % el precio de los audífonos respecto a su precio promedio:
 
 ```{r}
-ajuste_audifonos <- ajustes_demanda |>
-  filter(producto == "Audífonos") |>
-  pull(ajuste) |>
-  pluck(1)
+ajuste_audifonos <- ajustes_demanda[["Audífonos"]]
 
 precio_medio <- mean(ventas$precio[ventas$producto == "Audífonos"])
 
@@ -138,12 +202,9 @@ escenarios <- tibble(
 )
 
 escenarios |>
-  bind_cols(predict(ajuste_audifonos, new_data = escenarios)) |>
   mutate(
-    cantidad = exp(.pred),
+    cantidad = exp(predict(ajuste_audifonos, newdata = escenarios)),
     ingreso = precio * cantidad,
     across(where(is.numeric), \(x) round(x, 1))
-  ) |>
-  select(-.pred)
+  )
 ```
-

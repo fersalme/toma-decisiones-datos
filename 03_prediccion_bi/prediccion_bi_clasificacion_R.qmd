@@ -10,13 +10,14 @@ format:
     number-sections: true
     embed-resources: true
     code-tools: true
+    code-fold: true
     df-print: kable
 execute:
   warning: false
   message: false
 ---
 
-Este notebook desarrolla en R los casos de estudio de la presentación **Análisis Predictivo en Business Intelligence** con el enfoque [**tidymodels**](https://www.tidymodels.org/). Los datos son simulados con una semilla fija por el script `simular_datos.R`, que los guarda en la carpeta `datos/`. La versión en Python de este notebook lee los mismos archivos, por lo que ambos trabajan con exactamente los mismos datos.
+Este notebook desarrolla en R los casos de estudio de la presentación **Análisis Predictivo en Business Intelligence** con el enfoque [**tidymodels**](https://www.tidymodels.org/).
 
 tidymodels organiza el modelado en piezas que se combinan siempre de la misma forma, sin importar el modelo:
 
@@ -24,28 +25,44 @@ tidymodels organiza el modelado en piezas que se combinan siempre de la misma fo
 |---|---|---|
 | `rsample` | `initial_split()`, `training()`, `testing()` | Partir los datos en entrenamiento y prueba |
 | `recipes` | `recipe()`, `step_*()` | Definir el preprocesamiento (roles, transformaciones, estandarización) |
-| `parsnip` | `logistic_reg()`, `decision_tree()`, `rand_forest()` | Especificar el modelo y el motor que lo estima |
+| `parsnip` | `logistic_reg()`, `decision_tree()`, `rand_forest()`, `boost_tree()` | Especificar el modelo y el motor que lo estima |
 | `workflows` | `workflow()` | Unir receta y modelo en un solo objeto que se ajusta y predice |
 | `yardstick` | `metric_set()`, `conf_mat()`, `roc_curve()` | Evaluar las predicciones |
 | `broom` | `tidy()`, `glance()`, `augment()` | Convertir los resultados de los modelos en tablas |
 
 ```{r}
 library(tidymodels)
-library(tidyverse)
+library(tidyverse) # read_csv() y manejo de datos
 library(rpart.plot)
 
-tidymodels_prefer() # en caso de conflicto, usar las funciones de tidymodels
 theme_set(theme_minimal(base_size = 13))
 ```
 
 # Fuga de clientes (churn)
 
-Una empresa de telecomunicaciones quiere decidir **a qué clientes dirigir una campaña de retención**. Se comparan tres modelos de clasificación: logit, árbol de clasificación y random forest.
+Una empresa de telecomunicaciones quiere decidir **a qué clientes dirigir una campaña de retención**. Se comparan cuatro modelos de clasificación: logit, árbol de clasificación, random forest y XGBoost.
 
 ## Datos
 
+Los datos disponibles describen a 5.000 clientes de la empresa. Cada fila es un cliente y las columnas son:
+
+| Variable | Tipo | Descripción | Valores |
+|---|---|---|---|
+| `id_cliente` | Identificador | Número único del cliente | 1 a 5.000 |
+| `antiguedad` | Numérica | Meses que lleva el cliente con la empresa | 1 a 72 meses |
+| `cargo_mensual` | Numérica | Valor que paga el cliente cada mes (USD) | 20 a 150 USD |
+| `contrato` | Categórica | Tipo de contrato | Mensual, Anual, Bianual |
+| `llamadas_soporte` | Numérica (conteo) | Número de llamadas del cliente al servicio de soporte | 0, 1, 2, … |
+| `pago_electronico` | Binaria | Si el cliente paga con medio electrónico | 1 = sí, 0 = no |
+| `churn` | Binaria (**respuesta**) | Si el cliente abandonó la empresa | 1 = Fuga, 0 = Permanece |
+| `conjunto` | Identificador | Partición asignada al cliente | entrenamiento, prueba |
+
+`churn` es la variable que se quiere predecir; las cinco variables de antigüedad, cargo, contrato, llamadas y forma de pago son los **predictores**. Al leer los datos, `contrato` y `churn` se convierten en factores: `Mensual` queda como categoría de referencia y `Fuga` como la clase de interés.
+
 ```{r}
-telco <- read_csv("datos/telco_churn.csv", show_col_types = FALSE) |>
+telco <- read_csv("datos/telco_churn.csv", show_col_types = FALSE)
+
+telco <- telco |> 
   mutate(
     # Mensual como categoría de referencia
     contrato = factor(contrato, levels = c("Mensual", "Anual", "Bianual")),
@@ -55,13 +72,159 @@ telco <- read_csv("datos/telco_churn.csv", show_col_types = FALSE) |>
 head(telco)
 ```
 
+## Análisis exploratorio
+
+La tasa de fuga general es de `r round(mean(telco$churn == "Fuga") * 100, 1)` %: aproximadamente uno de cada cinco clientes abandona la empresa. El análisis exploratorio busca qué diferencia a los clientes que se van de los que permanecen. En todos los gráficos el azul representa a los clientes que permanecen y el naranja a los que se fugan.
+
 ```{r}
-telco |>
-  group_by(contrato) |>
-  summarise(clientes = n(), tasa_fuga = round(mean(churn == "Fuga") * 100, 1))
+colores_churn <- c(Permanece = "#2a78d6", Fuga = "#eb6834")
+tasa_general <- mean(telco$churn == "Fuga")
 ```
 
-La tasa de fuga general es de `r round(mean(telco$churn == "Fuga") * 100, 1)` %. Los clientes con contrato mensual se van mucho más que los de contratos largos.
+### Variables numéricas
+
+Se compara la distribución de la antigüedad y del cargo mensual entre los dos grupos de clientes:
+
+```{r}
+#| fig-width: 11
+#| fig-height: 4.5
+telco |>
+  select(churn, antiguedad, cargo_mensual) |>
+  pivot_longer(-churn, names_to = "variable", values_to = "valor") |>
+  mutate(
+    variable = recode(
+      variable,
+      antiguedad = "Antigüedad (meses)",
+      cargo_mensual = "Cargo mensual (USD)"
+    )
+  ) |>
+  ggplot(aes(valor, color = churn)) +
+  geom_density(linewidth = 1) +
+  facet_wrap(~variable, scales = "free") +
+  scale_color_manual(values = colores_churn) +
+  labs(
+    title = "Distribución de las variables numéricas según la fuga",
+    x = NULL,
+    y = "Densidad",
+    color = NULL
+  ) +
+  theme(legend.position = "top", panel.grid.minor = element_blank())
+```
+
+Los clientes que se fugan se concentran en los **primeros meses** de relación con la empresa, mientras que los que permanecen tienen antigüedades mayores. En el cargo mensual la diferencia es menor, pero los clientes que se van tienden a pagar **cargos más altos**.
+
+### Variables categóricas
+
+Para las variables con pocas categorías se calcula la tasa de fuga de cada categoría. Las llamadas a soporte se agrupan en "4+" a partir de cuatro llamadas porque hay pocos clientes con más.
+
+```{r}
+#| fig-width: 11
+#| fig-height: 4.5
+# Tasa de fuga por cada nivel de una variable
+tasa_por <- function(datos, variable, etiqueta) {
+  datos |>
+    group_by(nivel = as.character({{ variable }})) |>
+    summarise(clientes = n(), tasa = mean(churn == "Fuga"), .groups = "drop") |>
+    mutate(variable = etiqueta)
+}
+
+tasas <- bind_rows(
+  tasa_por(telco, contrato, "Tipo de contrato"),
+  telco |>
+    mutate(
+      llamadas = if_else(
+        llamadas_soporte >= 4,
+        "4+",
+        as.character(llamadas_soporte)
+      )
+    ) |>
+    tasa_por(llamadas, "Llamadas a soporte"),
+  telco |>
+    mutate(pago = if_else(pago_electronico == 1, "Sí", "No")) |>
+    tasa_por(pago, "Pago electrónico")
+) |>
+  mutate(
+    nivel = factor(
+      nivel,
+      levels = c("Mensual", "Anual", "Bianual", "0", "1", "2", "3", "4+", "No", "Sí")
+    ),
+    variable = factor(
+      variable,
+      levels = c("Tipo de contrato", "Llamadas a soporte", "Pago electrónico")
+    )
+  )
+
+ggplot(tasas, aes(nivel, tasa)) +
+  geom_col(fill = colores_churn[["Fuga"]], width = 0.7) +
+  geom_hline(yintercept = tasa_general, linetype = "dashed", color = "gray40") +
+  geom_text(
+    aes(label = scales::percent(tasa, accuracy = 1)),
+    vjust = -0.4,
+    size = 3.6,
+    color = "gray15"
+  ) +
+  facet_wrap(~variable, scales = "free_x") +
+  scale_y_continuous(
+    labels = scales::percent,
+    expand = expansion(mult = c(0, 0.12))
+  ) +
+  labs(
+    title = "Tasa de fuga según las variables categóricas",
+    subtitle = sprintf(
+      "La línea punteada es la tasa de fuga general (%.1f %%)",
+      tasa_general * 100
+    ),
+    x = NULL,
+    y = "Tasa de fuga"
+  ) +
+  theme(panel.grid.major.x = element_blank(), panel.grid.minor = element_blank())
+```
+
+- **Contrato:** los clientes con contrato mensual se van mucho más que los de contratos largos; el contrato bianual tiene la tasa de fuga más baja.
+- **Llamadas a soporte:** la tasa de fuga crece con cada llamada adicional. Un cliente que llama mucho a soporte es un cliente insatisfecho.
+- **Pago electrónico:** los clientes que pagan con medio electrónico se fugan algo más que los demás.
+
+### Interacción entre antigüedad y cargo mensual
+
+Las variables también pueden actuar en conjunto. El mapa de calor muestra la tasa de fuga para cada combinación de tramos de antigüedad y de cargo mensual:
+
+```{r}
+#| fig-width: 9
+#| fig-height: 5
+telco |>
+  mutate(
+    tramo_antiguedad = cut(
+      antiguedad,
+      breaks = seq(0, 72, 12),
+      labels = c("1-12", "13-24", "25-36", "37-48", "49-60", "61-72")
+    ),
+    tramo_cargo = cut(
+      cargo_mensual,
+      breaks = c(20, 50, 70, 90, 110, 150),
+      include.lowest = TRUE,
+      labels = c("20-50", "50-70", "70-90", "90-110", "110-150")
+    )
+  ) |>
+  group_by(tramo_antiguedad, tramo_cargo) |>
+  summarise(clientes = n(), tasa = mean(churn == "Fuga"), .groups = "drop") |>
+  ggplot(aes(tramo_antiguedad, tramo_cargo, fill = tasa)) +
+  geom_tile(color = "white", linewidth = 1) +
+  geom_text(
+    aes(label = scales::percent(tasa, accuracy = 1), color = tasa > 0.4),
+    size = 3.6
+  ) +
+  scale_fill_gradient(low = "#cde2fb", high = "#104281", labels = scales::percent) +
+  scale_color_manual(values = c(`FALSE` = "gray10", `TRUE` = "white"), guide = "none") +
+  labs(
+    title = "Tasa de fuga según antigüedad y cargo mensual",
+    x = "Antigüedad (meses)",
+    y = "Cargo mensual (USD)",
+    fill = "Tasa de fuga"
+  ) +
+  theme(panel.grid = element_blank())
+```
+
+La fuga es máxima en la esquina superior izquierda: **clientes nuevos (menos de un año) con cargos altos (más de 90 USD)**, donde se van dos de cada tres clientes o más. Este tipo de combinación es difícil de capturar con un logit que solo incluye cada variable por separado, pero los árboles, el random forest y XGBoost la pueden detectar por sí mismos.
 
 ## Entrenamiento y prueba
 
@@ -71,19 +234,6 @@ Partición estratificada: 70 % para entrenar y 30 % para evaluar, con la misma p
 #| eval: false
 set.seed(2026)
 particion <- initial_split(telco, prop = 0.7, strata = churn)
-```
-
-Para que los resultados coincidan con la versión en Python, la partición ya viene definida en la columna `conjunto` de los datos. `make_splits()` construye con ella el mismo tipo de objeto que devuelve `initial_split()`:
-
-```{r}
-particion <- make_splits(
-  list(
-    analysis = which(telco$conjunto == "entrenamiento"),
-    assessment = which(telco$conjunto == "prueba")
-  ),
-  data = telco
-)
-particion
 
 entrenamiento <- training(particion)
 prueba <- testing(particion)
@@ -95,7 +245,7 @@ bind_rows(Entrenamiento = entrenamiento, Prueba = prueba, .id = "conjunto") |>
 
 ## Receta de preprocesamiento
 
-La receta declara que `churn` es la variable de respuesta y que `id_cliente` y `conjunto` son identificadores, no predictores. Se usa la misma receta para los tres modelos.
+La receta declara que `churn` es la variable de respuesta y que `id_cliente` y `conjunto` son identificadores, no predictores. Se usa la misma receta para el logit, el árbol y el random forest; XGBoost agrega un paso adicional (ver su sección).
 
 ```{r}
 receta <- recipe(churn ~ ., data = entrenamiento) |>
@@ -204,6 +354,57 @@ extract_fit_engine(bosque_fit)$importance |>
   )
 ```
 
+## XGBoost
+
+El random forest construye muchos árboles **en paralelo** e independientes, y promedia sus votos. **XGBoost** (*extreme gradient boosting*) también combina muchos árboles, pero los construye **en secuencia**: cada árbol nuevo se ajusta a los errores que dejaron los anteriores, y su aporte se suma al modelo multiplicado por una **tasa de aprendizaje** pequeña, para que el modelo avance poco a poco y no se sobreajuste.
+
+Los hiperparámetros principales en `boost_tree()` son:
+
+| Hiperparámetro | Valor | Qué controla |
+|---|---|---|
+| `trees` | 300 | Número de árboles en la secuencia |
+| `tree_depth` | 3 | Profundidad de cada árbol (árboles pequeños, "débiles") |
+| `learn_rate` | 0.05 | Cuánto aporta cada árbol nuevo al modelo |
+| `min_n` | 20 | Mínimo de clientes en un nodo para seguir dividiéndolo |
+
+XGBoost solo acepta variables numéricas, por eso se agrega a la receta el paso `step_dummy()`, que convierte `contrato` en variables indicadoras (0/1), igual que lo hace internamente el logit.
+
+```{r}
+receta_xgb <- receta |>
+  step_dummy(all_nominal_predictors())
+
+xgb_spec <- boost_tree(
+  trees = 300,
+  tree_depth = 3,
+  learn_rate = 0.05,
+  min_n = 20
+) |>
+  set_engine("xgboost") |>
+  set_mode("classification")
+
+set.seed(2026)
+xgb_fit <- workflow(receta_xgb, xgb_spec) |>
+  fit(data = entrenamiento)
+
+xgb_fit
+```
+
+La importancia de cada variable en XGBoost se mide con la **ganancia** (*gain*): cuánto mejora el ajuste, en promedio, cada vez que un árbol usa esa variable para dividir.
+
+```{r}
+#| fig-width: 9
+#| fig-height: 5
+xgboost::xgb.importance(model = extract_fit_engine(xgb_fit)) |>
+  as_tibble() |>
+  ggplot(aes(Gain, reorder(Feature, Gain))) +
+  geom_col(fill = "skyblue", color = "black") +
+  labs(
+    title = "XGBoost: importancia de las variables",
+    x = "Ganancia",
+    y = NULL
+  )
+```
+
 ## Comparación de modelos
 
 `augment()` agrega al conjunto de prueba la clase predicha (`.pred_class`, con umbral 0.5) y las probabilidades de cada clase (`.pred_Permanece`, `.pred_Fuga`). Con `yardstick` se calculan las métricas; como `Fuga` es el segundo nivel de `churn`, se indica `event_level = "second"`.
@@ -212,7 +413,8 @@ extract_fit_engine(bosque_fit)$importance |>
 modelos <- list(
   "Logit" = logit_fit,
   "Árbol" = arbol_fit,
-  "Random forest" = bosque_fit
+  "Random forest" = bosque_fit,
+  "XGBoost" = xgb_fit
 )
 
 predicciones <- modelos |>
@@ -255,7 +457,7 @@ mejor_modelo <- as.character(metricas$Modelo[which.max(metricas$AUC)])
 metricas |> mutate(across(where(is.numeric), \(x) round(x, 3)))
 ```
 
-El modelo con mayor AUC es **`r mejor_modelo`**. Un modelo más complejo no siempre predice mejor: cuando la relación entre las variables y el *log-odds* de fuga es casi lineal, el logit compite de igual a igual con el random forest. Con el umbral de 0.5 la **sensibilidad es baja** (se detecta una minoría de los clientes que se van), lo que motiva revisar el umbral.
+El modelo con mayor AUC es **`r mejor_modelo`**. Un modelo más complejo no siempre predice mejor: cuando la relación entre las variables y el *log-odds* de fuga es casi lineal, el logit compite de igual a igual con el random forest y con XGBoost. Con el umbral de 0.5 la **sensibilidad es baja** (se detecta una minoría de los clientes que se van), lo que motiva revisar el umbral.
 
 ## Matriz de confusión y curva ROC
 
