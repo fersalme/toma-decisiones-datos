@@ -16,23 +16,24 @@ execute:
   message: false
 ---
 
-Este notebook desarrolla en R los casos de estudio de la presentación **Análisis Predictivo en Business Intelligence** con el enfoque [**tidymodels**](https://www.tidymodels.org/). Los datos son simulados con una semilla fija por el script `simular_datos.R`, que los guarda en la carpeta `datos/`. La versión en Python de este notebook lee los mismos archivos, por lo que ambos trabajan con exactamente los mismos datos.
+Este notebook desarrolla en R el caso de segmentación de la presentación **Análisis Predictivo en Business Intelligence**.
 
-tidymodels organiza el modelado en piezas que se combinan siempre de la misma forma, sin importar el modelo:
+Las funciones principales que usamos son:
 
-| Paquete | Pieza | Para qué sirve |
+| Función | Paquete | Para qué sirve |
 |---|---|---|
-| `recipes` | `recipe()`, `step_*()` | Definir el preprocesamiento (roles, transformaciones, estandarización) |
-| `stats` | `kmeans()` | Estimar los grupos con k-means |
-| `broom` | `tidy()`, `glance()`, `augment()` | Convertir los resultados de los modelos en tablas |
+| `scale()` | `base` (R base) | Estandarizar las variables |
+| `kmeans()` | `stats` (R base) | Estimar los grupos con k-means |
+| `silhouette()` | `cluster` | Calcular el coeficiente de silueta |
+| `+`, `plot_layout()` | `patchwork` | Combinar varios gráficos de ggplot en una sola figura |
 
 ```{r}
-library(tidymodels)
 library(tidyverse)
 library(cluster)
+library(patchwork)
 
-tidymodels_prefer() # en caso de conflicto, usar las funciones de tidymodels
 theme_set(theme_minimal(base_size = 13))
+options(digits = 3) # mostrar los resultados con 3 decimales
 ```
 
 # Segmentación de clientes (RFM)
@@ -41,101 +42,161 @@ El área de marketing de una cadena de retail quiere diseñar acciones diferenci
 
 ## Datos
 
+| Variable | Descripción |
+|---|---|
+| `id_cliente` | Número único del cliente |
+| `recencia` | Días desde la última compra (menor es mejor) |
+| `frecuencia` | Número de compras en el último año |
+| `ticket_promedio` | Valor promedio de cada compra (USD) |
+
 ```{r}
 retail <- read_csv("datos/retail_rfm.csv", show_col_types = FALSE)
+
 summary(select(retail, -id_cliente))
 ```
 
-## Estandarización con una receta
+## Estandarización
 
-k-means usa distancias, así que las variables se estandarizan con `step_normalize()`. Al preparar la receta (`prep()`) se guardan la media y la desviación de cada variable, que después se reutilizan para estandarizar clientes nuevos.
+k-means agrupa a los clientes según la **distancia** entre ellos. Si no se estandarizan las variables, la recencia (que va de 1 a 365 días) pesaría mucho más que la frecuencia (que va de 1 a unas 30 compras). Por eso cada variable se transforma a media 0 y desviación estándar 1:
+
+$$
+z = \frac{x - \bar{x}}{s}
+$$
+
+`scale()` aplica esta transformación a cada columna:
 
 ```{r}
 variables_rfm <- c("recencia", "frecuencia", "ticket_promedio")
 
-receta_rfm <- recipe(
-  ~ recencia + frecuencia + ticket_promedio,
-  data = retail
-) |>
-  step_normalize(all_numeric_predictors()) |>
-  prep()
+X_rfm <- scale(retail[variables_rfm])
 
-X_rfm <- bake(receta_rfm, new_data = NULL)
-
-tidy(receta_rfm, number = 1) |> select(variable = terms, statistic, value)
+head(X_rfm)
 ```
 
 ## Elegir el número de grupos
 
-Se estima k-means para $k = 2, \dots, 8$, con 10 inicializaciones aleatorias cada uno (`nstart`). `glance()` entrega la inercia (`tot.withinss`) de cada modelo.
+Se estima k-means para $k = 2, \dots, 8$ grupos. Para cada $k$ se guardan dos medidas:
+
+- **Inercia** (`tot.withinss`): la suma de las distancias al cuadrado de cada cliente a su centroide. Siempre baja al aumentar $k$; se busca el **codo**, el punto a partir del cual deja de bajar mucho.
+- **Silueta promedio**: mide qué tan bien separado está cada cliente de los demás grupos. Va de -1 a 1; cuanto más alta, mejor.
+
+`nstart = 10` indica que k-means se ejecuta 10 veces con centroides iniciales distintos y se queda con la mejor solución.
+
+```{r}
+k_valores <- 2:8
+inercia <- numeric(length(k_valores))
+silueta <- numeric(length(k_valores))
+
+distancias <- dist(X_rfm) # distancias entre todos los clientes, para la silueta
+
+set.seed(2026)
+for (i in seq_along(k_valores)) {
+  modelo <- kmeans(X_rfm, centers = k_valores[i], nstart = 10)
+  inercia[i] <- modelo$tot.withinss
+  silueta[i] <- mean(silhouette(modelo$cluster, distancias)[, "sil_width"])
+}
+
+seleccion_k <- tibble(k = k_valores, inercia = inercia, silueta = silueta)
+seleccion_k
+```
+
+Cada gráfico se guarda en un objeto y, con el paquete `patchwork`, se combinan en una sola figura sumándolos con `+`:
 
 ```{r}
 #| fig-width: 11
-#| fig-height: 4.5
-distancias <- dist(X_rfm)
-
-set.seed(2026)
-seleccion_k <- tibble(k = 2:8) |>
-  mutate(
-    modelo = map(k, \(k) kmeans(X_rfm, centers = k, nstart = 10)),
-    `Inercia (WCSS)` = map_dbl(modelo, \(m) glance(m)$tot.withinss),
-    `Silueta promedio` = map_dbl(modelo, \(m) {
-      mean(silhouette(m$cluster, distancias)[, "sil_width"])
-    })
-  )
-
-seleccion_k |>
-  select(-modelo) |>
-  pivot_longer(-k, names_to = "criterio", values_to = "valor") |>
-  ggplot(aes(k, valor)) +
+#| fig-height: 4
+g_codo <- ggplot(seleccion_k, aes(k, inercia)) +
   geom_line(color = "#790cee", linewidth = 1) +
   geom_point(color = "#790cee", size = 2.5) +
-  facet_wrap(~criterio, scales = "free_y") +
+  labs(title = "Método del codo", x = "Número de grupos (k)", y = "Inercia")
+
+g_silueta <- ggplot(seleccion_k, aes(k, silueta)) +
+  geom_line(color = "#790cee", linewidth = 1) +
+  geom_point(color = "#790cee", size = 2.5) +
   labs(
-    title = "Método del codo y coeficiente de silueta",
+    title = "Coeficiente de silueta",
     x = "Número de grupos (k)",
-    y = NULL
+    y = "Silueta promedio"
   )
+
+g_codo + g_silueta
 ```
 
-El codo aparece en $k = `r seleccion_k$k[which.max(seleccion_k[["Silueta promedio"]])]`$, que también maximiza la silueta.
+```{r}
+k_optimo <- k_valores[which.max(silueta)]
+```
+
+El codo aparece en $k = `r k_optimo`$, que también es el valor con la silueta más alta.
 
 ## Estimación y perfil de los segmentos
 
-`augment()` agrega a los datos la columna `.cluster` con el grupo asignado a cada cliente.
+Se estima k-means con `r k_optimo` grupos y se guarda en `retail` el grupo asignado a cada cliente.
 
 ```{r}
 set.seed(2026)
-kmeans_rfm <- kmeans(X_rfm, centers = 4, nstart = 10)
+kmeans_rfm <- kmeans(X_rfm, centers = k_optimo, nstart = 10)
 
-# Nombrar los segmentos ordenándolos por recencia (de más a menos reciente)
-nombres <- c("Campeones", "Leales", "Ocasionales de alto ticket", "Inactivos")
+retail$grupo <- kmeans_rfm$cluster
+```
 
-retail <- augment(kmeans_rfm, retail) |>
-  rename(grupo = .cluster)
+El **perfil** de cada grupo es el promedio de sus variables en las unidades originales (días, compras y USD), que son más fáciles de interpretar que las estandarizadas:
 
+```{r}
 perfil <- retail |>
   group_by(grupo) |>
-  summarise(across(all_of(variables_rfm), mean), clientes = n()) |>
+  summarise(
+    recencia = mean(recencia),
+    frecuencia = mean(frecuencia),
+    ticket_promedio = mean(ticket_promedio),
+    clientes = n()
+  ) |>
   mutate(pct_clientes = clientes / sum(clientes) * 100) |>
-  arrange(recencia) |>
-  mutate(segmento = factor(nombres, levels = nombres))
+  arrange(recencia)
+
+perfil
+```
+
+k-means numera los grupos al azar (1, 2, 3, 4), así que el número no tiene significado. Para darles un nombre, los grupos se ordenaron por recencia, del que compró más recientemente al que lleva más tiempo sin comprar, y se nombran según su perfil:
+
+```{r}
+perfil$segmento <- c(
+  "Campeones",
+  "Leales",
+  "Ocasionales de alto ticket",
+  "Inactivos"
+)
 
 retail <- left_join(retail, select(perfil, grupo, segmento), by = "grupo")
 
-perfil |>
-  select(segmento, all_of(variables_rfm), clientes, pct_clientes) |>
-  mutate(across(where(is.numeric), \(x) round(x, 1)))
+# Factor para que los gráficos muestren los segmentos en este orden y no alfabéticamente
+retail$segmento <- factor(retail$segmento, levels = perfil$segmento)
+
+select(
+  perfil,
+  segmento,
+  recencia,
+  frecuencia,
+  ticket_promedio,
+  clientes,
+  pct_clientes
+)
 ```
 
 ## Visualización de los segmentos
 
+Los dos gráficos usan los mismos colores, así que con `plot_layout(guides = "collect")` se muestra **una sola leyenda** para ambos:
+
 ```{r}
 #| fig-width: 11
 #| fig-height: 5
-colores <- c("#790cee", "skyblue", "orange", "salmon")
+colores <- c(
+  "Campeones" = "#790cee",
+  "Leales" = "skyblue",
+  "Ocasionales de alto ticket" = "orange",
+  "Inactivos" = "salmon"
+)
 
-ggplot(retail, aes(recencia, frecuencia, color = segmento)) +
+g_recencia <- ggplot(retail, aes(recencia, frecuencia, color = segmento)) +
   geom_point(size = 1.2, alpha = 0.6) +
   scale_color_manual(values = colores) +
   labs(
@@ -145,7 +206,7 @@ ggplot(retail, aes(recencia, frecuencia, color = segmento)) +
     color = NULL
   )
 
-ggplot(retail, aes(frecuencia, ticket_promedio, color = segmento)) +
+g_ticket <- ggplot(retail, aes(frecuencia, ticket_promedio, color = segmento)) +
   geom_point(size = 1.2, alpha = 0.6) +
   scale_color_manual(values = colores) +
   labs(
@@ -154,28 +215,42 @@ ggplot(retail, aes(frecuencia, ticket_promedio, color = segmento)) +
     y = "Ticket promedio (USD)",
     color = NULL
   )
+
+g_recencia +
+  g_ticket +
+  plot_layout(guides = "collect") &
+  theme(legend.position = "bottom")
 ```
+
+El símbolo `&` aplica `theme(legend.position = "bottom")` a toda la figura combinada, para ubicar la leyenda compartida debajo de los dos gráficos.
 
 ## Asignar un cliente nuevo
 
-Un cliente nuevo se estandariza con la **misma receta** (`bake()` usa la media y la desviación de los datos originales) y se asigna al **centroide más cercano**. Los centroides se obtienen con `tidy()`.
+Cuando llega un cliente nuevo, se asigna al segmento cuyo **centroide** está más cerca. Hay que hacerlo en dos pasos:
+
+1. **Estandarizar** al cliente nuevo con la media y la desviación de los datos originales (no con las suyas).
+2. Calcular su **distancia** a cada centroide y elegir el más cercano.
 
 ```{r}
-nuevo <- tibble(recencia = 15, frecuencia = 20, ticket_promedio = 110)
-nuevo_z <- bake(receta_rfm, new_data = nuevo)
+nuevo <- c(recencia = 15, frecuencia = 20, ticket_promedio = 110)
 
-tidy(kmeans_rfm) |>
-  mutate(
-    distancia = sqrt(
-      (recencia - nuevo_z$recencia)^2 +
-        (frecuencia - nuevo_z$frecuencia)^2 +
-        (ticket_promedio - nuevo_z$ticket_promedio)^2
-    )
-  ) |>
-  slice_min(distancia, n = 1) |>
-  left_join(select(perfil, grupo, segmento), by = c("cluster" = "grupo")) |>
-  transmute(segmento, distancia = round(distancia, 3))
+# 1. Estandarizar con la media y la desviación de los datos originales
+medias <- colMeans(retail[variables_rfm])
+desviaciones <- sapply(retail[variables_rfm], sd)
+nuevo_z <- (nuevo - medias) / desviaciones
+
+# 2. Distancia euclidiana a cada centroide
+distancia <- numeric(k_optimo)
+for (j in 1:k_optimo) {
+  distancia[j] <- sqrt(sum((kmeans_rfm$centers[j, ] - nuevo_z)^2))
+}
+
+tibble(grupo = 1:k_optimo, distancia = distancia) |>
+  left_join(select(perfil, grupo, segmento), by = "grupo") |>
+  arrange(distancia)
 ```
+
+El cliente nuevo pertenece al segmento de la primera fila, el de menor distancia.
 
 ## Acciones por segmento
 

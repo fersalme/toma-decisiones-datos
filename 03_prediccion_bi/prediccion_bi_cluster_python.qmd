@@ -1,0 +1,254 @@
+---
+title: "Análisis Predictivo en Business Intelligence: segmentación (cluster) en Python"
+author: "Fernando Salcedo Mejía Eco, Ms"
+date: "Febrero 2026"
+lang: es
+format:
+  html:
+    toc: true
+    toc-depth: 2
+    number-sections: true
+    embed-resources: true
+    code-tools: true
+jupyter: python3
+execute:
+  warning: false
+  message: false
+---
+
+Este notebook desarrolla en Python el caso de segmentación de la presentación **Análisis Predictivo en Business Intelligence**.
+
+Las funciones principales que usamos son:
+
+| Función | Librería | Para qué sirve |
+|---|---|---|
+| `StandardScaler()` | `scikit-learn` | Estandarizar las variables |
+| `KMeans()` | `scikit-learn` | Estimar los grupos con k-means |
+| `silhouette_score()` | `scikit-learn` | Calcular el coeficiente de silueta |
+| `plt.subplots()` | `matplotlib` | Combinar varios gráficos en una sola figura |
+
+```{python}
+import matplotlib.pyplot as plt
+import pandas as pd
+import seaborn as sns
+from sklearn.cluster import KMeans
+from sklearn.metrics import silhouette_score
+from sklearn.preprocessing import StandardScaler
+
+sns.set_theme(style="whitegrid", font_scale=1.1)
+pd.set_option("display.precision", 3)  # mostrar los resultados con 3 decimales
+```
+
+# Segmentación de clientes (RFM)
+
+El área de marketing de una cadena de retail quiere diseñar acciones diferenciadas según el comportamiento de compra de sus clientes: **recencia**, **frecuencia** y **ticket promedio**.
+
+## Datos
+
+| Variable | Descripción |
+|---|---|
+| `id_cliente` | Número único del cliente |
+| `recencia` | Días desde la última compra (menor es mejor) |
+| `frecuencia` | Número de compras en el último año |
+| `ticket_promedio` | Valor promedio de cada compra (USD) |
+
+```{python}
+retail = pd.read_csv("datos/retail_rfm.csv")
+
+retail.drop(columns="id_cliente").describe()
+```
+
+## Estandarización
+
+k-means agrupa a los clientes según la **distancia** entre ellos. Si no se estandarizan las variables, la recencia (que va de 1 a 365 días) pesaría mucho más que la frecuencia (que va de 1 a unas 30 compras). Por eso cada variable se transforma a media 0 y desviación estándar 1:
+
+$$
+z = \frac{x - \bar{x}}{s}
+$$
+
+`StandardScaler()` aplica esta transformación a cada columna. Con `fit_transform()` calcula la media y la desviación de cada variable y transforma los datos. El objeto `escalador` guarda esas medias y desviaciones, que se usarán después para estandarizar clientes nuevos.
+
+```{python}
+variables_rfm = ["recencia", "frecuencia", "ticket_promedio"]
+
+escalador = StandardScaler()
+X_rfm = escalador.fit_transform(retail[variables_rfm])
+
+pd.DataFrame(X_rfm, columns=variables_rfm).head()
+```
+
+## Elegir el número de grupos
+
+Se estima k-means para $k = 2, \dots, 8$ grupos. Para cada $k$ se guardan dos medidas:
+
+- **Inercia** (`inertia_`): la suma de las distancias al cuadrado de cada cliente a su centroide. Siempre baja al aumentar $k$; se busca el **codo**, el punto a partir del cual deja de bajar mucho.
+- **Silueta promedio** (`silhouette_score()`): mide qué tan bien separado está cada cliente de los demás grupos. Va de -1 a 1; cuanto más alta, mejor.
+
+`n_init=10` indica que k-means se ejecuta 10 veces con centroides iniciales distintos y se queda con la mejor solución. `random_state=2026` fija la semilla aleatoria para que los resultados sean siempre los mismos.
+
+```{python}
+k_valores = range(2, 9)
+inercia = []
+silueta = []
+
+for k in k_valores:
+    modelo = KMeans(n_clusters=k, n_init=10, random_state=2026)
+    modelo.fit(X_rfm)
+    inercia.append(modelo.inertia_)
+    silueta.append(silhouette_score(X_rfm, modelo.labels_))
+
+seleccion_k = pd.DataFrame({"k": k_valores, "inercia": inercia, "silueta": silueta})
+seleccion_k
+```
+
+Con `plt.subplots(1, 2)` se crea una figura con dos gráficos lado a lado; cada uno se dibuja en su propio eje (`axes[0]` y `axes[1]`):
+
+```{python}
+#| fig-width: 11
+#| fig-height: 4
+fig, axes = plt.subplots(1, 2, figsize=(11, 4))
+
+axes[0].plot(
+    seleccion_k["k"], seleccion_k["inercia"], marker="o", color="#790cee", linewidth=2
+)
+axes[0].set(title="Método del codo", xlabel="Número de grupos (k)", ylabel="Inercia")
+
+axes[1].plot(
+    seleccion_k["k"], seleccion_k["silueta"], marker="o", color="#790cee", linewidth=2
+)
+axes[1].set(
+    title="Coeficiente de silueta",
+    xlabel="Número de grupos (k)",
+    ylabel="Silueta promedio",
+)
+
+plt.tight_layout()
+plt.show()
+```
+
+```{python}
+k_optimo = int(seleccion_k.loc[seleccion_k["silueta"].idxmax(), "k"])
+```
+
+El codo aparece en $k = `{python} k_optimo`$, que también es el valor con la silueta más alta.
+
+## Estimación y perfil de los segmentos
+
+Se estima k-means con `{python} k_optimo` grupos y se guarda en `retail` el grupo asignado a cada cliente.
+
+```{python}
+kmeans_rfm = KMeans(n_clusters=k_optimo, n_init=10, random_state=2026)
+kmeans_rfm.fit(X_rfm)
+
+retail["grupo"] = kmeans_rfm.labels_
+```
+
+El **perfil** de cada grupo es el promedio de sus variables en las unidades originales (días, compras y USD), que son más fáciles de interpretar que las estandarizadas:
+
+```{python}
+perfil = retail.groupby("grupo")[variables_rfm].mean()
+perfil["clientes"] = retail["grupo"].value_counts()
+perfil["pct_clientes"] = perfil["clientes"] / perfil["clientes"].sum() * 100
+perfil = perfil.sort_values("recencia")
+
+perfil
+```
+
+k-means numera los grupos al azar (0, 1, 2, 3), así que el número no tiene significado. Para darles un nombre, los grupos se ordenaron por recencia, del que compró más recientemente al que lleva más tiempo sin comprar, y se nombran según su perfil:
+
+```{python}
+perfil["segmento"] = ["Campeones", "Leales", "Ocasionales de alto ticket", "Inactivos"]
+
+# Agregar el nombre del segmento a cada cliente
+retail["segmento"] = retail["grupo"].map(perfil["segmento"])
+
+perfil.set_index("segmento")
+```
+
+## Visualización de los segmentos
+
+Los dos gráficos usan los mismos colores, así que basta con **una sola leyenda**: se dibuja solo en el segundo gráfico (`legend=False` en el primero).
+
+```{python}
+#| fig-width: 11
+#| fig-height: 5
+colores = {
+    "Campeones": "#790cee",
+    "Leales": "skyblue",
+    "Ocasionales de alto ticket": "orange",
+    "Inactivos": "salmon",
+}
+
+fig, axes = plt.subplots(1, 2, figsize=(11, 5))
+
+sns.scatterplot(
+    data=retail,
+    x="recencia",
+    y="frecuencia",
+    hue="segmento",
+    hue_order=colores.keys(),
+    palette=colores,
+    s=15,
+    alpha=0.6,
+    legend=False,
+    ax=axes[0],
+)
+axes[0].set(
+    title="Recencia vs. frecuencia",
+    xlabel="Recencia (días)",
+    ylabel="Frecuencia (compras al año)",
+)
+
+sns.scatterplot(
+    data=retail,
+    x="frecuencia",
+    y="ticket_promedio",
+    hue="segmento",
+    hue_order=colores.keys(),
+    palette=colores,
+    s=15,
+    alpha=0.6,
+    ax=axes[1],
+)
+axes[1].set(
+    title="Frecuencia vs. ticket promedio",
+    xlabel="Frecuencia (compras al año)",
+    ylabel="Ticket promedio (USD)",
+)
+axes[1].legend(title=None)
+
+plt.tight_layout()
+plt.show()
+```
+
+## Asignar un cliente nuevo
+
+Cuando llega un cliente nuevo, se asigna al segmento cuyo **centroide** está más cerca. Hay que hacerlo en dos pasos:
+
+1. **Estandarizar** al cliente nuevo con la media y la desviación de los datos originales (no con las suyas). Para eso se usa `transform()` del mismo `escalador`, que ya guarda esas medias y desviaciones.
+2. Calcular su **distancia** a cada centroide y elegir el más cercano. `kmeans_rfm.transform()` entrega la distancia a cada centroide.
+
+```{python}
+nuevo = pd.DataFrame({"recencia": [15], "frecuencia": [20], "ticket_promedio": [110]})
+
+# 1. Estandarizar con la media y la desviación de los datos originales
+nuevo_z = escalador.transform(nuevo)
+
+# 2. Distancia euclidiana a cada centroide
+distancias = kmeans_rfm.transform(nuevo_z)[0]
+
+pd.DataFrame(
+    {"distancia": distancias, "segmento": perfil["segmento"].sort_index()}
+).sort_values("distancia")
+```
+
+El cliente nuevo pertenece al segmento de la primera fila, el de menor distancia. `kmeans_rfm.predict(nuevo_z)` hace los dos pasos de una vez y devuelve directamente el grupo más cercano.
+
+## Acciones por segmento
+
+| Segmento | Acción comercial sugerida |
+|---|---|
+| **Campeones** | Programa de fidelización, acceso anticipado a lanzamientos, embajadores de marca |
+| **Leales** | Venta cruzada y venta adicional para subir el ticket |
+| **Ocasionales de alto ticket** | Recordatorios personalizados y beneficios por recompra para aumentar la frecuencia |
+| **Inactivos** | Campaña de reactivación de bajo costo; si no responden, reducir inversión |

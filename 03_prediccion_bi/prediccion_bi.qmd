@@ -24,7 +24,7 @@ title-slide-attributes:
 
 ## Toma de decisiones en Business Intelligence
 
-![](../recursos/bi.png)
+![](img/bi.png)
 
 ## Tipo de datos
 
@@ -163,7 +163,13 @@ Un modelo se evalúa con datos que **no vio durante la estimación**. Si lo eval
 - La partición se hace **estratificada**, para conservar la misma proporción de clientes que se fugan en ambos conjuntos. En los datos viene definida en la columna `conjunto`; desde cero se haría con `train_test_split(X, y, test_size=0.3, stratify=y)`.
 
 ```{python}
-predictores = ["antiguedad", "cargo_mensual", "contrato", "llamadas_soporte", "pago_electronico"]
+predictores = [
+    "antiguedad",
+    "cargo_mensual",
+    "contrato",
+    "llamadas_soporte",
+    "pago_electronico",
+]
 X = pd.get_dummies(df[predictores], columns=["contrato"], dtype=int)
 X = X.drop(columns="contrato_Mensual")  # categoría base
 y = df["churn"]
@@ -641,10 +647,22 @@ colores = dict(zip(nombres, ["#790cee", "skyblue", "orange", "salmon"]))
 
 fig, axes = plt.subplots(1, 2, figsize=(14, 6))
 for segmento, grupo in clientes.groupby("segmento"):
-    axes[0].scatter(grupo["recencia"], grupo["frecuencia"], s=12, alpha=0.6,
-                    color=colores[segmento], label=segmento)
-    axes[1].scatter(grupo["frecuencia"], grupo["ticket_promedio"], s=12, alpha=0.6,
-                    color=colores[segmento], label=segmento)
+    axes[0].scatter(
+        grupo["recencia"],
+        grupo["frecuencia"],
+        s=12,
+        alpha=0.6,
+        color=colores[segmento],
+        label=segmento,
+    )
+    axes[1].scatter(
+        grupo["frecuencia"],
+        grupo["ticket_promedio"],
+        s=12,
+        alpha=0.6,
+        color=colores[segmento],
+        label=segmento,
+    )
 
 axes[0].set_title("Recencia vs. frecuencia", fontsize=14)
 axes[0].set_xlabel("Recencia (días)")

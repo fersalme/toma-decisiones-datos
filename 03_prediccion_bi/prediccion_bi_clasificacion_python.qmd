@@ -1,0 +1,523 @@
+---
+title: "Análisis Predictivo en Business Intelligence: clasificación en Python"
+author: "Fernando Salcedo Mejía Eco, Ms"
+date: "Febrero 2026"
+lang: es
+format:
+  html:
+    toc: true
+    toc-depth: 2
+    number-sections: true
+    embed-resources: true
+    code-tools: true
+    code-fold: true
+jupyter: python3
+execute:
+  warning: false
+  message: false
+---
+
+Este notebook desarrolla en Python el caso de clasificación de la presentación **Análisis Predictivo en Business Intelligence**. En este notebook usamos cuatro librerías:
+
+| Librería | Funciones | Para qué sirve |
+|---|---|---|
+| `statsmodels` | `smf.logit()` | Estimar la regresión logística y ver sus coeficientes y valores p |
+| `scikit-learn` | `DecisionTreeClassifier()`, `RandomForestClassifier()` | Estimar el árbol de clasificación y el random forest |
+| `xgboost` | `XGBClassifier()` | Estimar XGBoost |
+| `scikit-learn` | `accuracy_score()`, `roc_auc_score()`, `ConfusionMatrixDisplay`, … | Evaluar las predicciones |
+
+```{python}
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import seaborn as sns
+import statsmodels.formula.api as smf
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import (
+    ConfusionMatrixDisplay,
+    RocCurveDisplay,
+    accuracy_score,
+    f1_score,
+    precision_score,
+    recall_score,
+    roc_auc_score,
+)
+from sklearn.model_selection import train_test_split
+from sklearn.tree import DecisionTreeClassifier, export_text, plot_tree
+from xgboost import XGBClassifier, plot_importance
+
+sns.set_theme(style="whitegrid", font_scale=1.1)
+pd.set_option("display.precision", 3)  # mostrar los resultados con 3 decimales
+```
+
+# Fuga de clientes (churn)
+
+Una empresa de telecomunicaciones quiere decidir **a qué clientes dirigir una campaña de retención**. Se comparan cuatro modelos de clasificación: logit, árbol de clasificación, random forest y XGBoost.
+
+## Datos
+
+Los datos disponibles describen a 5.000 clientes de la empresa. Cada fila es un cliente y las columnas son:
+
+| Variable | Tipo | Descripción | Valores |
+|---|---|---|---|
+| `id_cliente` | Identificador | Número único del cliente | 1 a 5.000 |
+| `antiguedad` | Numérica | Meses que lleva el cliente con la empresa | 1 a 72 meses |
+| `cargo_mensual` | Numérica | Valor que paga el cliente cada mes (USD) | 20 a 150 USD |
+| `contrato` | Categórica | Tipo de contrato | Mensual, Anual, Bianual |
+| `llamadas_soporte` | Numérica (conteo) | Número de llamadas del cliente al servicio de soporte | 0, 1, 2, … |
+| `pago_electronico` | Binaria | Si el cliente paga con medio electrónico | 1 = sí, 0 = no |
+| `churn` | Binaria (**respuesta**) | Si el cliente abandonó la empresa | 1 = Fuga, 0 = Permanece |
+| `conjunto` | Identificador | Partición asignada al cliente | entrenamiento, prueba |
+
+`churn` es la variable que se quiere predecir; las cinco variables de antigüedad, cargo, contrato, llamadas y forma de pago son los **predictores**. En Python `churn` se deja como número: 1 = Fuga y 0 = Permanece. `contrato` se convierte en una variable categórica con `Mensual` como primera categoría, para que sea la categoría de referencia del logit.
+
+```{python}
+telco = pd.read_csv("datos/telco_churn.csv")
+
+telco["contrato"] = pd.Categorical(
+    telco["contrato"], categories=["Mensual", "Anual", "Bianual"]
+)
+
+telco.head()
+```
+
+## Análisis exploratorio
+
+```{python}
+tasa_general = telco["churn"].mean()
+```
+
+La tasa de fuga general es de `{python} f"{tasa_general * 100:.1f}"` %: aproximadamente uno de cada cinco clientes abandona la empresa. El análisis exploratorio busca qué diferencia a los clientes que se van de los que permanecen.
+
+### Variables numéricas
+
+Se compara la distribución de la antigüedad y del cargo mensual entre los clientes que se van y los que permanecen:
+
+```{python}
+#| fig-width: 12
+#| fig-height: 4
+colores_churn = {0: "#2a78d6", 1: "#eb6834"}
+
+fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+
+sns.kdeplot(
+    data=telco,
+    x="antiguedad",
+    hue="churn",
+    palette=colores_churn,
+    common_norm=False,
+    ax=axes[0],
+)
+axes[0].set(title="Antigüedad", xlabel="Meses", ylabel="Densidad")
+
+sns.kdeplot(
+    data=telco,
+    x="cargo_mensual",
+    hue="churn",
+    palette=colores_churn,
+    common_norm=False,
+    ax=axes[1],
+)
+axes[1].set(title="Cargo mensual", xlabel="USD", ylabel="Densidad")
+
+plt.show()
+```
+
+En los gráficos, `churn = 1` (naranja) son los clientes que se fugan. Los clientes que se fugan se concentran en los **primeros meses** de relación con la empresa, mientras que los que permanecen tienen antigüedades mayores. En el cargo mensual la diferencia es menor, pero los clientes que se van tienden a pagar **cargos más altos**.
+
+### Variables categóricas
+
+Para las variables con pocas categorías se calcula la tasa de fuga de cada categoría. Como `churn` vale 1 cuando el cliente se fuga, **el promedio de `churn` es la tasa de fuga**. La línea punteada es la tasa de fuga general. Las llamadas a soporte se agrupan en "4 o más" porque hay pocos clientes con más llamadas.
+
+```{python}
+#| fig-width: 12
+#| fig-height: 4
+telco["llamadas"] = telco["llamadas_soporte"].clip(upper=4)
+
+fig, axes = plt.subplots(1, 3, figsize=(12, 4), sharey=True)
+
+telco.groupby("contrato", observed=True)["churn"].mean().plot.bar(
+    ax=axes[0], color="#eb6834"
+)
+axes[0].set(title="Tipo de contrato", xlabel="", ylabel="Tasa de fuga")
+
+telco.groupby("llamadas")["churn"].mean().plot.bar(ax=axes[1], color="#eb6834")
+axes[1].set(title="Llamadas a soporte", xlabel="4 = 4 o más llamadas")
+
+telco.groupby("pago_electronico")["churn"].mean().plot.bar(ax=axes[2], color="#eb6834")
+axes[2].set(title="Pago electrónico", xlabel="0 = No, 1 = Sí")
+
+for ax in axes:
+    ax.axhline(tasa_general, color="black", linestyle="--")
+    ax.tick_params(axis="x", rotation=0)
+
+plt.show()
+```
+
+- **Contrato:** los clientes con contrato mensual se van mucho más que los de contratos largos; el contrato bianual tiene la tasa de fuga más baja.
+- **Llamadas a soporte:** la tasa de fuga crece con cada llamada adicional. Un cliente que llama mucho a soporte es un cliente insatisfecho.
+- **Pago electrónico:** los clientes que pagan con medio electrónico se fugan algo más que los demás.
+
+### Interacción entre antigüedad y cargo mensual
+
+Las variables también pueden actuar en conjunto. El mapa de calor muestra la tasa de fuga para cada combinación de tramos de antigüedad y de cargo mensual. Un tramo como `(0, 12]` significa "más de 0 y hasta 12".
+
+```{python}
+#| fig-width: 9
+#| fig-height: 5
+telco["tramo_antiguedad"] = pd.cut(
+    telco["antiguedad"], bins=[0, 12, 24, 36, 48, 60, 72]
+)
+telco["tramo_cargo"] = pd.cut(telco["cargo_mensual"], bins=[0, 50, 70, 90, 110, 150])
+
+tasas = telco.pivot_table(
+    index="tramo_cargo",
+    columns="tramo_antiguedad",
+    values="churn",
+    aggfunc="mean",
+    observed=True,
+)
+
+plt.figure(figsize=(9, 5))
+sns.heatmap(
+    tasas, annot=True, fmt=".0%", cmap="Oranges", cbar_kws={"label": "Tasa de fuga"}
+)
+plt.gca().invert_yaxis()  # cargos más altos arriba
+plt.title("Tasa de fuga según antigüedad y cargo mensual")
+plt.xlabel("Antigüedad (meses)")
+plt.ylabel("Cargo mensual (USD)")
+plt.show()
+```
+
+La fuga es máxima en la esquina superior izquierda: **clientes nuevos (menos de un año) con cargos altos (más de 90 USD)**, donde se van dos de cada tres clientes o más. Este tipo de combinación es difícil de capturar con un logit que solo incluye cada variable por separado, pero los árboles, el random forest y XGBoost la pueden detectar por sí mismos.
+
+## Entrenamiento y prueba
+
+Los datos se dividen con `train_test_split()` de scikit-learn: 70 % de los clientes para entrenar y 30 % para evaluar (`test_size=0.3`). Con `stratify=telco["churn"]` la partición es **estratificada**, es decir, ambos conjuntos conservan la misma proporción de clientes que se fugan. `random_state=2026` fija la semilla aleatoria para que la partición sea siempre la misma.
+
+No hace falta eliminar `id_cliente` ni `conjunto`, porque en este notebook los predictores de cada modelo se indican explícitamente.
+
+
+```{python}
+entrenamiento, prueba = train_test_split(
+    telco, test_size=0.3, stratify=telco["churn"], random_state=2026
+)
+
+pd.DataFrame(
+    {
+        "clientes": [len(entrenamiento), len(prueba)],
+        "tasa_fuga": [entrenamiento["churn"].mean(), prueba["churn"].mean()],
+    },
+    index=["Entrenamiento", "Prueba"],
+)
+```
+
+## Regresión logística (logit)
+
+El logit se estima con `smf.logit()` de statsmodels, usando una fórmula: la variable de respuesta a la izquierda de `~` y los predictores a la derecha.
+
+```{python}
+formula = "churn ~ antiguedad + cargo_mensual + contrato + llamadas_soporte + pago_electronico"
+
+logit = smf.logit(formula, data=entrenamiento).fit(disp=False)
+logit.summary()
+```
+
+Los **odds ratios** ($e^{\beta_j}$) facilitan la interpretación. Se calculan aplicando `np.exp()` a los coeficientes y a sus intervalos de confianza:
+
+```{python}
+odds_ratios = pd.DataFrame(
+    {
+        "odds_ratio": np.exp(logit.params),
+        "conf.low": np.exp(logit.conf_int()[0]),
+        "conf.high": np.exp(logit.conf_int()[1]),
+        "p.value": logit.pvalues,
+    }
+)
+odds_ratios
+```
+
+Cada llamada adicional a soporte multiplica los *odds* de fuga por `{python} f"{odds_ratios.loc['llamadas_soporte', 'odds_ratio']:.2f}"`, mientras que un contrato bianual los multiplica por `{python} f"{odds_ratios.loc['contrato[T.Bianual]', 'odds_ratio']:.2f}"` frente al contrato mensual.
+
+## Predictores para scikit-learn y XGBoost
+
+scikit-learn y XGBoost no usan fórmulas: necesitan una tabla de predictores **numéricos** (`X`) y la variable de respuesta (`y`) por separado. `pd.get_dummies()` convierte `contrato` en variables indicadoras (0/1); con `drop_first=True` se elimina la de `Mensual`, que queda como categoría de referencia, igual que en el logit.
+
+```{python}
+predictores = [
+    "antiguedad",
+    "cargo_mensual",
+    "contrato",
+    "llamadas_soporte",
+    "pago_electronico",
+]
+
+X_entrenamiento = pd.get_dummies(entrenamiento[predictores], drop_first=True, dtype=int)
+X_prueba = pd.get_dummies(prueba[predictores], drop_first=True, dtype=int)
+y_entrenamiento = entrenamiento["churn"]
+y_prueba = prueba["churn"]
+
+X_entrenamiento.head()
+```
+
+## Árbol de clasificación
+
+Para evitar el sobreajuste se limita el crecimiento del árbol:
+
+- `max_depth=3`: máximo 3 niveles de preguntas.
+- `min_samples_split=150`: un nodo necesita al menos 150 clientes para dividirse.
+- `min_samples_leaf=50`: cada hoja debe tener al menos 50 clientes.
+
+```{python}
+#| fig-width: 16
+#| fig-height: 7
+arbol = DecisionTreeClassifier(
+    max_depth=3, min_samples_split=150, min_samples_leaf=50, random_state=2026
+)
+arbol.fit(X_entrenamiento, y_entrenamiento)
+
+plt.figure(figsize=(16, 7))
+plot_tree(
+    arbol,
+    feature_names=X_entrenamiento.columns,
+    class_names=["Permanece", "Fuga"],
+    filled=True,
+    proportion=True,
+    fontsize=10,
+)
+plt.title("Árbol de clasificación: fuga de clientes")
+plt.show()
+```
+
+El árbol también puede expresarse como **reglas de decisión** para comunicarlas a la gerencia. Con `show_weights=True` cada hoja muestra la proporción de clientes que permanecen y que se fugan:
+
+```{python}
+print(
+    export_text(arbol, feature_names=list(X_entrenamiento.columns), show_weights=True)
+)
+```
+
+## Random forest
+
+Se usan 300 árboles (`n_estimators=300`), y cada hoja debe tener al menos 20 clientes (`min_samples_leaf=20`).
+
+```{python}
+bosque = RandomForestClassifier(
+    n_estimators=300, min_samples_leaf=20, random_state=2026
+)
+bosque.fit(X_entrenamiento, y_entrenamiento)
+```
+
+La importancia de las variables mide cuánto contribuye cada una a reducir la impureza (Gini) de los árboles:
+
+```{python}
+#| fig-width: 8
+#| fig-height: 4.5
+importancia = pd.Series(bosque.feature_importances_, index=X_entrenamiento.columns)
+
+importancia.sort_values().plot.barh(
+    color="skyblue", edgecolor="black", figsize=(8, 4.5)
+)
+plt.title("Random forest: importancia de las variables")
+plt.xlabel("Reducción media de la impureza (Gini)")
+plt.show()
+```
+
+## XGBoost
+
+El random forest construye muchos árboles **en paralelo** e independientes, y promedia sus votos. **XGBoost** (*extreme gradient boosting*) también combina muchos árboles, pero los construye **en secuencia**: cada árbol nuevo se ajusta a los errores que dejaron los anteriores, y su aporte se suma al modelo multiplicado por una **tasa de aprendizaje** pequeña, para que el modelo avance poco a poco y no se sobreajuste.
+
+| Hiperparámetro | Valor | Qué controla |
+|---|---|---|
+| `n_estimators` | 300 | Número de árboles en la secuencia |
+| `max_depth` | 3 | Profundidad de cada árbol (árboles pequeños, "débiles") |
+| `learning_rate` | 0.05 | Cuánto aporta cada árbol nuevo al modelo |
+| `min_child_weight` | 20 | Controla el tamaño mínimo de cada hoja |
+
+```{python}
+xgb = XGBClassifier(
+    n_estimators=300,
+    max_depth=3,
+    learning_rate=0.05,
+    min_child_weight=20,
+    random_state=2026,
+)
+xgb.fit(X_entrenamiento, y_entrenamiento)
+```
+
+La importancia de cada variable en XGBoost se mide con la **ganancia** (*gain*): cuánto mejora el ajuste, en promedio, cada vez que un árbol usa esa variable para dividir.
+
+```{python}
+#| fig-width: 8
+#| fig-height: 4.5
+plot_importance(
+    xgb,
+    importance_type="gain",
+    show_values=False,
+    title="XGBoost: importancia de las variables",
+)
+plt.show()
+```
+
+## Comparación de modelos
+
+Cada modelo calcula la **probabilidad de fuga** de los clientes de prueba:
+
+- En statsmodels, `logit.predict()` entrega directamente la probabilidad de fuga.
+- En scikit-learn y XGBoost, `predict_proba()` entrega una columna por clase; la segunda (`[:, 1]`) es la probabilidad de `churn = 1`, es decir, de fuga.
+
+Se guardan las probabilidades de los cuatro modelos en un diccionario:
+
+```{python}
+probabilidades = {
+    "Logit": logit.predict(prueba),
+    "Árbol": arbol.predict_proba(X_prueba)[:, 1],
+    "Random forest": bosque.predict_proba(X_prueba)[:, 1],
+    "XGBoost": xgb.predict_proba(X_prueba)[:, 1],
+}
+```
+
+Para cada modelo se predice fuga cuando la probabilidad es mayor o igual a 0.5, y se calculan las métricas. La especificidad no tiene una función propia en scikit-learn: es la sensibilidad (`recall_score`) de la clase 0, por eso se calcula con `pos_label=0`.
+
+| Función de scikit-learn | Métrica |
+|---|---|
+| `accuracy_score` | Exactitud |
+| `precision_score` | Precisión |
+| `recall_score` | Sensibilidad |
+| `recall_score(..., pos_label=0)` | Especificidad |
+| `f1_score` | F1 |
+| `roc_auc_score` | AUC |
+
+```{python}
+filas = []
+for modelo, prob in probabilidades.items():
+    clase = (prob >= 0.5).astype(int)
+    filas.append(
+        {
+            "modelo": modelo,
+            "exactitud": accuracy_score(y_prueba, clase),
+            "precisión": precision_score(y_prueba, clase),
+            "sensibilidad": recall_score(y_prueba, clase),
+            "especificidad": recall_score(y_prueba, clase, pos_label=0),
+            "F1": f1_score(y_prueba, clase),
+            "AUC": roc_auc_score(y_prueba, prob),
+        }
+    )
+
+metricas = pd.DataFrame(filas).set_index("modelo")
+metricas
+```
+
+El **logit**, **XGBoost** y el **random forest** obtienen un AUC muy parecido (alrededor de 0.80), claramente por encima del árbol. Un modelo más complejo no siempre predice mejor: cuando la relación entre las variables y el *log-odds* de fuga es casi lineal, un modelo simple como el logit compite de igual a igual con los modelos más complejos. Como además es más fácil de interpretar, en lo que sigue se trabaja con el logit. Con el umbral de 0.5 la **sensibilidad es baja** (se detecta una minoría de los clientes que se van), lo que motiva revisar el umbral.
+
+## Matriz de confusión y curva ROC
+
+Matriz de confusión del logit con el umbral de 0.5:
+
+```{python}
+#| fig-width: 5
+#| fig-height: 4
+prob_logit = probabilidades["Logit"]
+
+ConfusionMatrixDisplay.from_predictions(
+    y_prueba,
+    (prob_logit >= 0.5).astype(int),
+    display_labels=["Permanece", "Fuga"],
+    cmap="Blues",
+)
+plt.xlabel("Predicho")
+plt.ylabel("Real")
+plt.grid(False)
+plt.show()
+```
+
+Curva ROC de los cuatro modelos:
+
+```{python}
+#| fig-width: 7
+#| fig-height: 6
+fig, ax = plt.subplots(figsize=(7, 6))
+
+for modelo, prob in probabilidades.items():
+    RocCurveDisplay.from_predictions(y_prueba, prob, name=modelo, ax=ax)
+
+ax.plot([0, 1], [0, 1], color="gray", linestyle="--")
+ax.set(xlabel="Tasa de falsos positivos (1 - especificidad)", ylabel="Sensibilidad")
+plt.show()
+```
+
+## Elegir el umbral
+
+Los modelos anteriores predicen que un cliente se fuga cuando su probabilidad de fuga es **mayor o igual a 0.5**. Ese umbral es una convención estadística, no una decisión de negocio.
+
+Supongamos que una campaña de retención tiene los siguientes valores:
+
+- Contactar a un cliente cuesta **USD 20**.
+- Retener a un cliente que se iba a fugar vale **USD 100**.
+
+Si se contacta a un cliente que no se iba a ir (**falso positivo**), se pierden USD 20. Si no se contacta a un cliente que sí se iba (**falso negativo**), se pierden USD 100. Dejar escapar a un cliente cuesta **cinco veces más** que contactarlo de más.
+
+Por eso conviene contactar también a clientes con probabilidad de fuga menor a 0.5. Por ejemplo, contactar a un cliente con probabilidad de fuga de 0.3 deja en promedio $0.3 \times 100 - 20 = 10$ USD de beneficio.
+
+Para un umbral $u$, se contacta a todos los clientes con probabilidad de fuga mayor o igual a $u$, y el beneficio de la campaña es:
+
+$$
+\text{Beneficio}(u) = 100 \cdot VP(u) - 20 \cdot \left[VP(u) + FP(u)\right]
+$$
+
+donde $VP(u)$ son los clientes contactados que sí se iban a fugar y $VP(u) + FP(u)$ es el total de clientes contactados. El objetivo es encontrar el umbral que **maximiza el beneficio**.
+
+Para cada umbral posible se calcula a cuántos clientes se contactaría y cuántos de ellos realmente se iban a fugar (verdaderos positivos):
+
+```{python}
+#| fig-width: 9
+#| fig-height: 5
+umbrales = np.round(np.arange(0.05, 0.96, 0.01), 2)
+beneficio = []
+
+for u in umbrales:
+    contactados = prob_logit >= u
+    vp = (contactados & (y_prueba == 1)).sum()
+    beneficio.append(100 * vp - 20 * contactados.sum())
+
+beneficio = np.array(beneficio)
+umbral_optimo = umbrales[beneficio.argmax()]
+beneficio_05 = beneficio[umbrales == 0.5][0]
+
+plt.figure(figsize=(9, 5))
+plt.plot(umbrales, beneficio, color="#790cee", linewidth=2)
+plt.axvline(umbral_optimo, color="red", linestyle="--", label="Umbral óptimo")
+plt.axvline(0.5, color="gray", linestyle=":", label="Umbral por defecto (0.5)")
+plt.title("Beneficio de la campaña según el umbral de decisión (logit)")
+plt.xlabel("Umbral de probabilidad de fuga")
+plt.ylabel("Beneficio neto (USD)")
+plt.legend()
+plt.show()
+```
+
+Con el umbral por defecto de 0.5 la campaña genera USD `{python} f"{beneficio_05:,}".replace(",", ".")`. Con el umbral óptimo de `{python} f"{umbral_optimo:.2f}"` el beneficio sube a USD `{python} f"{beneficio.max():,}".replace(",", ".")`. Como retener a un cliente vale cinco veces lo que cuesta contactarlo, conviene contactar a muchos más clientes de los que el umbral de 0.5 sugiere.
+
+Con el umbral óptimo, las métricas del modelo cambian: se sacrifica precisión a cambio de detectar a muchos más clientes que se van.
+
+```{python}
+clase_05 = (prob_logit >= 0.5).astype(int)
+clase_optima = (prob_logit >= umbral_optimo).astype(int)
+
+pd.DataFrame(
+    {
+        "umbral 0.5": [
+            accuracy_score(y_prueba, clase_05),
+            precision_score(y_prueba, clase_05),
+            recall_score(y_prueba, clase_05),
+            recall_score(y_prueba, clase_05, pos_label=0),
+        ],
+        "umbral óptimo": [
+            accuracy_score(y_prueba, clase_optima),
+            precision_score(y_prueba, clase_optima),
+            recall_score(y_prueba, clase_optima),
+            recall_score(y_prueba, clase_optima, pos_label=0),
+        ],
+    },
+    index=["exactitud", "precisión", "sensibilidad", "especificidad"],
+)
+```
